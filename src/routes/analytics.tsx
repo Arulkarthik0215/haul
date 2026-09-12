@@ -14,10 +14,11 @@ import {
   Line,
   CartesianGrid,
 } from "recharts";
-import { mockOrders, getPlatformMeta } from "@/lib/mock-data";
+import { useOrders } from "@/hooks/use-orders";
+import { getPlatformMeta } from "@/lib/mock-data";
 import { formatCurrency } from "@/lib/format";
 import { StatCard } from "@/components/stat-card";
-import { TrendingUp, ShoppingCart, Repeat, PieChart as PieIcon } from "lucide-react";
+import { TrendingUp, ShoppingCart, Repeat, PieChart as PieIcon, Loader2 } from "lucide-react";
 
 export const Route = createFileRoute("/analytics")({
   head: () => ({ meta: [{ title: "Analytics · OrderHub" }] }),
@@ -27,7 +28,8 @@ export const Route = createFileRoute("/analytics")({
 const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function Analytics() {
-  const valid = mockOrders.filter((o) => o.status !== "cancelled" && o.status !== "refunded");
+  const { data: orders = [], isLoading } = useOrders();
+  const valid = orders.filter((o) => o.status !== "cancelled" && o.status !== "refunded");
 
   const monthly = useMemo(() => {
     const map = new Map<string, number>();
@@ -77,6 +79,14 @@ function Analytics() {
 
   const avgOrder = valid.reduce((s, o) => s + o.totalAmount, 0) / (valid.length || 1);
   const totalSpent = valid.reduce((s, o) => s + o.totalAmount, 0);
+
+  if (isLoading) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 md:px-8">

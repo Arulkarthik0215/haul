@@ -1,6 +1,6 @@
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { ArrowLeft, ExternalLink, FileText, CreditCard, Calendar, Truck } from "lucide-react";
-import { getOrderById } from "@/lib/mock-data";
+import { fetchOrderById } from "@/services/orders";
 import type { Product } from "@/types/order";
 import { MerchantAvatar } from "@/components/merchant-avatar";
 import { StatusBadge } from "@/components/status-badge";
@@ -11,8 +11,11 @@ export const Route = createFileRoute("/orders/$id")({
   head: ({ params }) => ({
     meta: [{ title: `Order ${params.id} · OrderHub` }, { name: "robots", content: "noindex" }],
   }),
-  loader: ({ params }) => {
-    const order = getOrderById(params.id);
+  loader: async ({ context, params }) => {
+    const order = await context.queryClient.ensureQueryData({
+      queryKey: ["orders", params.id],
+      queryFn: () => fetchOrderById(params.id),
+    });
     if (!order) throw notFound();
     return { order };
   },

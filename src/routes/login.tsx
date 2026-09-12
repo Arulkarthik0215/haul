@@ -1,5 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Inbox, Sparkles } from "lucide-react";
+import { useSignIn } from "@/hooks/use-auth";
 
 export const Route = createFileRoute("/login")({
   head: () => ({
@@ -10,6 +11,24 @@ export const Route = createFileRoute("/login")({
 
 function Login() {
   const navigate = useNavigate();
+  const { mutate: signIn, isPending } = useSignIn();
+
+  const handleGoogleSignIn = () => {
+    signIn(undefined, {
+      onSuccess: (res) => {
+        if (res.data?.url) {
+          window.location.href = res.data.url;
+        } else {
+          // fallback to dashboard if mock login
+          navigate({ to: "/" });
+        }
+      },
+      onError: (err) => {
+        console.error("Sign in error:", err);
+      },
+    });
+  };
+
   return (
     <div className="relative min-h-screen bg-background text-foreground">
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
@@ -37,11 +56,12 @@ function Login() {
 
         <div className="mt-10 flex w-full flex-col gap-3">
           <button
-            onClick={() => navigate({ to: "/" })}
-            className="inline-flex h-11 w-full items-center justify-center gap-2.5 rounded-lg bg-foreground text-sm font-medium text-background transition-opacity hover:opacity-90"
+            onClick={handleGoogleSignIn}
+            disabled={isPending}
+            className="inline-flex h-11 w-full items-center justify-center gap-2.5 rounded-lg bg-foreground text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             <GoogleIcon />
-            Continue with Google
+            {isPending ? "Connecting..." : "Continue with Google"}
           </button>
           <button
             onClick={() => navigate({ to: "/" })}

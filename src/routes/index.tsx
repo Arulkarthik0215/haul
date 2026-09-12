@@ -2,8 +2,9 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Package, CheckCircle2, Wallet, RotateCcw } from "lucide-react";
 import { StatCard } from "@/components/stat-card";
 import { OrderCard } from "@/components/order-card";
-import { mockOrders } from "@/lib/mock-data";
+import { useOrders } from "@/hooks/use-orders";
 import { formatCurrency } from "@/lib/format";
+import { Loader2 } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -16,28 +17,38 @@ export const Route = createFileRoute("/")({
 });
 
 function Dashboard() {
+  const { data: orders = [], isLoading } = useOrders();
+
   const now = new Date();
   const thisMonth = (d: string) => {
     const dt = new Date(d);
     return dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear();
   };
 
-  const active = mockOrders.filter((o) =>
+  const active = orders.filter((o) =>
     ["ordered", "packed", "shipped", "out_for_delivery"].includes(o.status),
   );
-  const deliveredThisMonth = mockOrders.filter(
+  const deliveredThisMonth = orders.filter(
     (o) => o.status === "delivered" && o.deliveredDate && thisMonth(o.deliveredDate),
   );
-  const spentThisMonth = mockOrders
+  const spentThisMonth = orders
     .filter((o) => thisMonth(o.orderDate) && o.status !== "cancelled" && o.status !== "refunded")
     .reduce((s, o) => s + o.totalAmount, 0);
-  const pendingReturns = mockOrders.filter(
+  const pendingReturns = orders.filter(
     (o) => o.status === "delivered" && o.returnDeadline && new Date(o.returnDeadline) > now,
   );
 
-  const sorted = [...mockOrders].sort(
+  const sorted = [...orders].sort(
     (a, b) => new Date(b.orderDate).getTime() - new Date(a.orderDate).getTime(),
   );
+
+  if (isLoading) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 md:px-8">

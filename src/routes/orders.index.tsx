@@ -1,11 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { OrderCard } from "@/components/order-card";
-import { mockOrders } from "@/lib/mock-data";
+import { useOrders } from "@/hooks/use-orders";
 import type { OrderStatus, Platform } from "@/types/order";
 import { cn } from "@/lib/utils";
 import { EmptyState } from "@/components/empty-state";
-import { PackageSearch } from "lucide-react";
+import { PackageSearch, Loader2 } from "lucide-react";
 
 export const Route = createFileRoute("/orders/")({
   head: () => ({ meta: [{ title: "Orders · OrderHub" }] }),
@@ -26,14 +26,16 @@ const filters: { key: Filter; label: string }[] = [
 function OrdersPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [platform, setPlatform] = useState<Platform | "all">("all");
+  
+  const { data: orders = [], isLoading } = useOrders();
 
   const platforms = useMemo(
-    () => Array.from(new Set(mockOrders.map((o) => o.platform))) as Platform[],
-    [],
+    () => Array.from(new Set(orders.map((o) => o.platform))) as Platform[],
+    [orders],
   );
 
   const filtered = useMemo(() => {
-    return mockOrders
+    return orders
       .filter((o) => {
         if (platform !== "all" && o.platform !== platform) return false;
         if (filter === "all") return true;
@@ -42,7 +44,15 @@ function OrdersPage() {
         return o.status === filter;
       })
       .sort((a, b) => new Date(b.orderDate).getTime() - new Date(a.orderDate).getTime());
-  }, [filter, platform]);
+  }, [filter, platform, orders]);
+
+  if (isLoading) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 md:px-8">
@@ -50,7 +60,7 @@ function OrdersPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Orders</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            {filtered.length} of {mockOrders.length} orders
+            {filtered.length} of {orders.length} orders
           </p>
         </div>
         <select

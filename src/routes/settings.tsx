@@ -2,7 +2,10 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Mail, Bell, RefreshCw, Shield, LogOut, Moon, Sun } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { useTheme } from "@/hooks/use-theme";
+import { useSignOut, useAuthSession } from "@/hooks/use-auth";
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { supabase, getProviderToken } from "@/lib/supabase";
 
 export const Route = createFileRoute("/settings")({
   head: () => ({ meta: [{ title: "Settings · OrderHub" }] }),
@@ -13,7 +16,95 @@ function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const [notifications, setNotifications] = useState(true);
   const [autoSync, setAutoSync] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  
   const navigate = useNavigate();
+  const { mutate: signOut } = useSignOut();
+  const { data: session } = useAuthSession();
+
+  const handleSignOut = () => {
+    signOut(undefined, {
+      onSuccess: () => navigate({ to: "/login" })
+    });
+  };
+
+  const handleSync = async () => {
+    if (!supabase) return;
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const providerToken = getProviderToken();
+
+      if (!providerToken) {
+        setSyncResult("Google token expired. Please log out and sign in again to re-authorize.");
+        return;
+      }
+
+      // Force a session refresh to get a valid access token
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      
+      if (sessionError || !session) {
+        setSyncResult(`Session error: ${sessionError?.message || 'No active session. Please log in again.'}`);
+        return;
+      }
+
+      let nextPageToken: string | undefined = undefined;
+      let totalProcessed = 0;
+      let totalOrders = 0;
+      let pagesFetched = 0;
+      const MAX_PAGES = 5; // Safety limit: process up to 100 emails per sync click
+
+      do {
+        setSyncResult(`Syncing... Processed ${totalProcessed} emails so far.`);
+        
+        const res = await fetch(
+          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-gmail`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${session.access_token}`,
+              'Content-Type': 'application/json',
+              'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+            },
+            body: JSON.stringify({ 
+              provider_token: providerToken,
+              page_token: nextPageToken 
+            }),
+          }
+        );
+
+        const result = await res.json();
+
+        if (!res.ok || result.error) {
+          setSyncResult(`Sync error: ${result.error || result.message || res.statusText}`);
+          break; // Stop on error
+        }
+
+        totalProcessed += result.processed || 0;
+        totalOrders += result.orders?.length || 0;
+        nextPageToken = result.nextPageToken;
+        pagesFetched++;
+
+        // Update UI immediately with findings
+        queryClient.invalidateQueries({ queryKey: ["orders"] });
+
+      } while (nextPageToken && pagesFetched < MAX_PAGES);
+
+      if (pagesFetched >= MAX_PAGES && nextPageToken) {
+        setSyncResult(`Synced! Processed ${totalProcessed} emails, found ${totalOrders} orders. Click Sync again to fetch more older history.`);
+      } else {
+        setSyncResult(`Sync complete! Processed ${totalProcessed} emails, found ${totalOrders} orders.`);
+      }
+
+    } catch (e: any) {
+      console.error(e);
+      setSyncResult(`Sync failed: ${e.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-8 md:px-8">
@@ -21,7 +112,7 @@ function SettingsPage() {
       <p className="mt-1 text-sm text-muted-foreground">Manage your account and preferences.</p>
 
       <Section title="Account">
-        <Row icon={Mail} label="Connected Gmail" value="you@gmail.com" />
+        <Row icon={Mail} label="Connected Gmail" value={session?.user?.email || "Demo User"} />
       </Section>
 
       <Section title="Appearance">
@@ -63,6 +154,21 @@ function SettingsPage() {
           checked={autoSync}
           onChange={setAutoSync}
         />
+        <div className="mt-4 flex justify-end">
+          <button 
+            onClick={handleSync}
+            disabled={syncing}
+            className="inline-flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background hover:bg-foreground/90 disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
+            {syncing ? 'Syncing...' : 'Sync Now'}
+          </button>
+          {syncResult && (
+            <p className={`mt-2 text-xs ${syncResult.startsWith('Synced') ? 'text-green-400' : 'text-yellow-400'}`}>
+              {syncResult}
+            </p>
+          )}
+        </div>
       </Section>
 
       <Section title="Privacy">
@@ -78,7 +184,7 @@ function SettingsPage() {
       </Section>
 
       <button
-        onClick={() => navigate({ to: "/login" })}
+        onClick={handleSignOut}
         className="mt-8 inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm text-muted-foreground hover:border-destructive/40 hover:text-destructive"
       >
         <LogOut className="h-4 w-4" /> Log out
