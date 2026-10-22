@@ -67,3 +67,7 @@ CREATE POLICY "Users see own timeline" ON order_timeline
   FOR ALL USING (order_id IN (SELECT id FROM orders WHERE user_id = auth.uid()));
 CREATE POLICY "Users see own sync state" ON gmail_sync_state
   FOR ALL USING (auth.uid() = user_id);
+
+-- Google OAuth refresh token so the sync-gmail function can renew Gmail access
+-- (run this on existing databases too)
+ALTER TABLE gmail_sync_state ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;

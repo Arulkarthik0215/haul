@@ -12,10 +12,11 @@ const platformMeta: Record<Platform, { category: Category; color: string; letter
   BookMyShow: { category: "entertainment", color: "oklch(0.6 0.22 25)", letter: "B" },
   Uber: { category: "travel", color: "oklch(0.3 0.01 260)", letter: "U" },
   IRCTC: { category: "travel", color: "oklch(0.55 0.16 245)", letter: "I" },
+  Other: { category: "shopping", color: "oklch(0.5 0.03 260)", letter: "•" },
 };
 
 export function getPlatformMeta(p: Platform) {
-  return platformMeta[p];
+  return platformMeta[p] ?? platformMeta.Other;
 }
 
 function daysAgo(n: number): string {

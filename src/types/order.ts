@@ -18,7 +18,8 @@ export type Platform =
   | "Ajio"
   | "BookMyShow"
   | "Uber"
-  | "IRCTC";
+  | "IRCTC"
+  | "Other";
 
 export type Category = "shopping" | "food" | "grocery" | "entertainment" | "travel";
 

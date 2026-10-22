@@ -23,7 +23,7 @@ export function OrderCard({ order }: Props) {
           <span className="text-muted-foreground/40">·</span>
           <span className="text-xs text-muted-foreground">{relativeTime(order.orderDate)}</span>
         </div>
-        <div className="mt-0.5 truncate text-sm font-medium">{order.products[0].name}</div>
+        <div className="mt-0.5 truncate text-sm font-medium">{order.products[0]?.name ?? order.merchant}</div>
         <div className="mt-1 flex items-center gap-3">
           <StatusBadge status={order.status} />
           {order.expectedDelivery && order.status !== "delivered" && order.status !== "cancelled" && (

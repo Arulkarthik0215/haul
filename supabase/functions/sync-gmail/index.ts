@@ -1,19 +1,221 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { GoogleGenerativeAI } from "npm:@google/generative-ai@0.21.0";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+const PLATFORMS = [
+  "Amazon", "Flipkart", "Swiggy", "Zomato", "Blinkit", "Zepto",
+  "Myntra", "Ajio", "BookMyShow", "Uber", "IRCTC",
+];
+const STATUSES = ["ordered", "packed", "shipped", "out_for_delivery", "delivered", "cancelled", "refunded"];
+const CATEGORIES = ["shopping", "food", "grocery", "entertainment", "travel"];
+
+const GMAIL_QUERY = "subject:(order OR receipt OR invoice OR purchase OR shipped OR delivery)";
+
+// Gemini model is configurable so it can be bumped without a code change when Google retires models
+const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") || "gemini-3.8-flash";
+
+// Supabase limits each request to ~2s CPU / 250MB memory and 150s wall clock, so batches stay
+// small, Gemini calls are capped, and no new email is started after the time budget.
+const TIME_BUDGET_MS = 60_000;
+const GEMINI_TIMEOUT_MS = 25_000;
+const CONCURRENCY = 2;
+
+class GmailAuthError extends Error {}
+// Config-level failures (bad model, bad key) that would fail every email — abort the batch instead
+class FatalSyncError extends Error {}
+// Gemini overloaded / rate limited / slow — the email is left for the next sync
+class GeminiBusyError extends Error {}
+
+// Edge functions have a tight CPU budget, so bodies are decoded lazily and capped in size.
+// Gemini only sees the first ~6000 chars of text anyway.
+const MAX_ENCODED_TEXT = 16_000;
+const MAX_ENCODED_HTML = 200_000;
+
+function decodeBase64(data: string, maxLength: number): string {
+  const trimmed = data.length > maxLength ? data.slice(0, maxLength - (maxLength % 4)) : data;
+  const binary = atob(trimmed.replace(/-/g, "+").replace(/_/g, "/"));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#?\w+;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Collects the still-encoded text/html parts, walking nested multipart structures
+function collectParts(payload: any, out: { text: string[]; html: string[] }) {
+  if (payload?.parts) {
+    for (const part of payload.parts) collectParts(part, out);
+  } else if (payload?.body?.data) {
+    if (payload.mimeType === "text/plain") out.text.push(payload.body.data);
+    else if (payload.mimeType === "text/html") out.html.push(payload.body.data);
+  }
+}
+
+// Prefers the plain-text part; only decodes HTML for HTML-only emails (most order confirmations)
+function extractBodyText(payload: any): string {
+  const parts = { text: [] as string[], html: [] as string[] };
+  collectParts(payload, parts);
+  if (parts.text.length > 0) {
+    const text = decodeBase64(parts.text[0], MAX_ENCODED_TEXT).trim();
+    if (text.length > 200) return text;
+  }
+  if (parts.html.length > 0) {
+    return stripHtml(decodeBase64(parts.html[0], MAX_ENCODED_HTML));
+  }
+  return "";
+}
+
+function getHeader(payload: any, name: string): string {
+  const header = payload?.headers?.find((h: any) => h.name?.toLowerCase() === name.toLowerCase());
+  return header?.value ?? "";
+}
+
+function toIsoOrNull(value: unknown): string | null {
+  if (!value) return null;
+  const d = new Date(String(value));
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+function toNumber(value: unknown): number {
+  if (typeof value === "number") return isFinite(value) ? value : 0;
+  const n = parseFloat(String(value ?? "").replace(/[^0-9.\-]/g, ""));
+  return isFinite(n) ? n : 0;
+}
+
+function pick<T extends string>(value: unknown, allowed: T[], fallback: T): T {
+  const v = String(value ?? "");
+  return (allowed.find((a) => a.toLowerCase() === v.toLowerCase()) ?? fallback) as T;
+}
+
+async function refreshGoogleAccessToken(refreshToken: string): Promise<string> {
+  const clientId = Deno.env.get("GOOGLE_CLIENT_ID");
+  const clientSecret = Deno.env.get("GOOGLE_CLIENT_SECRET");
+  if (!clientId || !clientSecret) {
+    throw new GmailAuthError("GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET secrets are not set");
+  }
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.access_token) {
+    throw new GmailAuthError(`Google token refresh failed: ${data.error_description || data.error || res.status}`);
+  }
+  return data.access_token;
+}
+
+async function gmailGet(url: string, accessToken: string): Promise<any> {
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  if (res.status === 401) {
+    throw new GmailAuthError("Gmail access token is invalid or expired");
+  }
+  const data = await res.json();
+  if (res.status === 403 && /insufficient.*scope/i.test(data.error?.message ?? "")) {
+    throw new GmailAuthError(
+      "Gmail read permission was not granted. Remove the app at myaccount.google.com/permissions, then sign in again and tick \"Read your email messages\".",
+    );
+  }
+  if (data.error) {
+    throw new Error(`Gmail API error: ${data.error.message} (code: ${data.error.code})`);
+  }
+  return data;
+}
+
+async function parseWithGemini(apiKey: string, emailText: string): Promise<any> {
+  const prompt = `Extract order information from this email and return JSON matching this shape:
+{
+  "platform": one of ${JSON.stringify([...PLATFORMS, "Other"])},
+  "merchant": "store name",
+  "order_id": "order number",
+  "status": one of ${JSON.stringify(STATUSES)},
+  "total_amount": number,
+  "currency": "ISO currency code, e.g. INR",
+  "category": one of ${JSON.stringify(CATEGORIES)},
+  "products": [{"name": "...", "quantity": 1, "price": number}],
+  "tracking_number": "if available, else null",
+  "order_date": "ISO date",
+  "expected_delivery": "ISO date if mentioned, else null",
+  "payment_method": "if mentioned, else null"
+}
+
+If this email is NOT about a purchase/order/receipt/invoice/delivery (e.g. marketing, newsletters, OTPs), return {"skip": true}.
+
+${emailText}`;
+
+  let res: Response | null = null;
+  let data: any = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+    try {
+      res = await callGemini(apiKey, prompt);
+    } catch (err: any) {
+      if (err?.name === "TimeoutError") throw new GeminiBusyError(`Gemini timed out after ${GEMINI_TIMEOUT_MS}ms`);
+      throw err;
+    }
+    data = await res.json();
+    if (![429, 500, 503].includes(res.status)) break;
+  }
+  if (!res!.ok) {
+    const msg = `Gemini API error (${GEMINI_MODEL}): ${data.error?.message || res!.status}`;
+    if ([429, 500, 503].includes(res!.status)) throw new GeminiBusyError(msg);
+    if ([400, 401, 403, 404].includes(res!.status) && /model|api key|permission|thinking/i.test(data.error?.message ?? "")) {
+      throw new FatalSyncError(msg);
+    }
+    throw new Error(msg);
+  }
+
+  const text: string = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? "").join("") ?? "";
+  return JSON.parse(text.replace(/```json/g, "").replace(/```/g, "").trim());
+}
+
+function callGemini(apiKey: string, prompt: string): Promise<Response> {
+  return fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    {
+      method: "POST",
+      signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          // Extraction doesn't need deep reasoning; low thinking keeps each call fast
+          thinkingConfig: { thinkingLevel: "low" },
+        },
+      }),
+    },
+  );
+}
+
 Deno.serve(async (req) => {
+  const requestStartedAt = Date.now();
   // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   try {
-    // Create a client using the user's JWT for auth verification
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) {
       throw new Error("Missing Authorization header");
@@ -34,213 +236,222 @@ Deno.serve(async (req) => {
       error: userError,
     } = await authClient.auth.getUser();
 
-    if (userError) {
-      throw new Error(`Auth failed: ${userError.message}`);
-    }
-    if (!user) {
-      throw new Error("Auth failed: no user returned");
+    if (userError || !user) {
+      throw new Error(`Auth failed: ${userError?.message || "no user returned"}`);
     }
 
     // Admin client — uses service role key to bypass RLS for DB writes
     const adminClient = createClient(supabaseUrl, supabaseServiceKey);
 
-    // 2. Get the Google provider token and optional page_token from the request body
-    const { provider_token, page_token } = await req.json();
-
-    if (!provider_token) {
-      throw new Error("Missing Google provider token");
-    }
-
-    // 3. Fetch emails from Gmail API
-    const query = "subject:(order OR receipt OR invoice OR purchase OR shipped OR delivery)";
-
-    let gmailUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=20`;
-    if (page_token) {
-      gmailUrl += `&pageToken=${page_token}`;
-    }
-
-    const gmailListResponse = await fetch(gmailUrl, {
-      headers: { Authorization: `Bearer ${provider_token}` },
-    });
-
-    const gmailListData = await gmailListResponse.json();
-    if (gmailListData.error) {
-      throw new Error(`Gmail API error: ${gmailListData.error.message} (code: ${gmailListData.error.code})`);
-    }
-
-    const messages = gmailListData.messages || [];
-    const nextPageToken = gmailListData.nextPageToken;
-    const parsedOrders = [];
-
-    // Initialize Gemini AI
     const geminiKey = Deno.env.get("GEMINI_API_KEY") || "";
     if (!geminiKey) {
       throw new Error("GEMINI_API_KEY secret is not set");
     }
-    const genAI = new GoogleGenerativeAI(geminiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-    // 4. Process each email
-    for (const message of messages) {
-      const emailResponse = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${message.id}?format=full`,
-        {
-          headers: { Authorization: `Bearer ${provider_token}` },
-        }
-      );
-      const emailData = await emailResponse.json();
+    // 2. Resolve a Google access token: use the one from the client if it still works,
+    //    otherwise mint a fresh one from the stored refresh token.
+    const { provider_token, provider_refresh_token, page_token, page_size } = await req.json().catch(() => ({}));
 
-      // Extract text content from email body — handles nested multipart structures
-      // and HTML-only emails (most order confirmations are HTML-only)
-      function decodeBase64(data: string): string {
-        return atob(data.replace(/-/g, "+").replace(/_/g, "/"));
+    if (provider_refresh_token) {
+      await adminClient
+        .from("gmail_sync_state")
+        .upsert({ user_id: user.id, google_refresh_token: provider_refresh_token });
+    }
+
+    const { data: syncState } = await adminClient
+      .from("gmail_sync_state")
+      .select("google_refresh_token, total_emails_processed")
+      .eq("user_id", user.id)
+      .maybeSingle();
+    const refreshToken: string | null = provider_refresh_token || syncState?.google_refresh_token || null;
+
+    let accessToken: string | null = provider_token || null;
+    const ensureFreshToken = async () => {
+      if (!refreshToken) {
+        throw new GmailAuthError("Google access expired and no refresh token is stored. Please sign out and sign in again.");
+      }
+      accessToken = await refreshGoogleAccessToken(refreshToken);
+    };
+    if (!accessToken) await ensureFreshToken();
+
+    // 3. Fetch emails from Gmail API
+    let gmailUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(GMAIL_QUERY)}&maxResults=${Math.min(Math.max(Number(page_size) || 8, 1), 20)}`;
+    if (page_token) {
+      gmailUrl += `&pageToken=${encodeURIComponent(page_token)}`;
+    }
+
+    let gmailListData;
+    try {
+      gmailListData = await gmailGet(gmailUrl, accessToken!);
+    } catch (err) {
+      if (!(err instanceof GmailAuthError) || !provider_token) throw err;
+      // The client-provided token expired — retry once with a refreshed token
+      await ensureFreshToken();
+      gmailListData = await gmailGet(gmailUrl, accessToken!);
+    }
+
+    const messages: { id: string }[] = gmailListData.messages || [];
+    const nextPageToken = gmailListData.nextPageToken;
+
+    // Skip emails we've already turned into orders (saves Gemini calls on re-sync)
+    const { data: existing } = await adminClient
+      .from("orders")
+      .select("email_message_id")
+      .eq("user_id", user.id)
+      .in("email_message_id", messages.map((m) => m.id));
+    const alreadySynced = new Set((existing ?? []).map((r: any) => r.email_message_id));
+
+    const parsedOrders: any[] = [];
+    const errors: string[] = [];
+    let skipped = 0;
+
+    // 4. Process emails a few at a time; stop starting new ones near the function's time limit.
+    //    Emails not reached aren't saved, so the next sync picks them up again.
+    const deadline = requestStartedAt + TIME_BUDGET_MS;
+    let deferred = 0;
+    const processMessage = async (message: { id: string }) => {
+      if (alreadySynced.has(message.id)) {
+        skipped++;
+        return;
       }
 
-      function stripHtml(html: string): string {
-        return html
-          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/&nbsp;/g, " ")
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .replace(/&#?\w+;/g, " ")
-          .replace(/\s+/g, " ")
-          .trim();
+      if (Date.now() > deadline) {
+        deferred++;
+        return;
       }
 
-      function extractBody(payload: any): { text: string; html: string } {
-        let text = "";
-        let html = "";
-
-        if (payload.parts) {
-          for (const part of payload.parts) {
-            if (part.mimeType === "text/plain" && part.body?.data) {
-              text += decodeBase64(part.body.data);
-            } else if (part.mimeType === "text/html" && part.body?.data) {
-              html += decodeBase64(part.body.data);
-            } else if (part.mimeType?.startsWith("multipart/")) {
-              const nested = extractBody(part);
-              if (nested.text) text += nested.text;
-              if (nested.html) html += nested.html;
-            }
-          }
-        } else if (payload.body?.data) {
-          if (payload.mimeType === "text/plain") {
-            text = decodeBase64(payload.body.data);
-          } else if (payload.mimeType === "text/html") {
-            html = decodeBase64(payload.body.data);
-          }
-        }
-
-        return { text, html };
-      }
-
-      const { text: plainText, html: htmlBody } = extractBody(emailData.payload);
-      const bodyText = plainText || stripHtml(htmlBody);
-
-      if (!bodyText) {
-        console.log("Skipping email with no extractable body:", message.id);
-        continue;
-      }
-
-      // 5. Parse with Gemini AI
-      const prompt = `
-      Extract order information from this email. Return valid JSON only, no markdown formatting.
-      {
-        "platform": "Amazon|Flipkart|Swiggy|Zomato|Blinkit|Zepto|Myntra|Ajio|BookMyShow|Uber|IRCTC|Other",
-        "merchant": "store name",
-        "order_id": "order number",
-        "status": "ordered|shipped|delivered|cancelled|refunded",
-        "total_amount": number,
-        "currency": "INR",
-        "category": "shopping|food|grocery|entertainment|travel",
-        "products": [{"name": "...", "quantity": 1, "price": number}],
-        "tracking_number": "if available",
-        "order_date": "ISO date",
-        "expected_delivery": "ISO date if mentioned",
-        "payment_method": "if mentioned"
-      }
-      
-      If this email is NOT an order/receipt/invoice, return: {"skip": true}
-      
-      Email content:
-      ${bodyText.substring(0, 3000)}
-      `;
-
+      const startedAt = Date.now();
       try {
-        const result = await model.generateContent(prompt);
-        let text = result.response.text();
+        const emailData = await gmailGet(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${message.id}?format=full`,
+          accessToken!,
+        );
 
-        // clean up markdown json blocks if returned
-        text = text.replace(/```json/g, "").replace(/```/g, "").trim();
-        const orderData = JSON.parse(text);
-
-        // Skip non-order emails
-        if (orderData.skip) {
-          console.log("Skipping non-order email:", message.id);
-          continue;
+        const bodyText = extractBodyText(emailData.payload);
+        if (!bodyText) {
+          skipped++;
+          return;
         }
 
-        // 6. Insert into Supabase using admin client (bypasses RLS)
-        const { data: insertedOrder, error: insertError } = await adminClient
+        const from = getHeader(emailData.payload, "From");
+        const subject = getHeader(emailData.payload, "Subject");
+        const receivedAt = emailData.internalDate
+          ? new Date(Number(emailData.internalDate)).toISOString()
+          : new Date().toISOString();
+
+        // 5. Parse with Gemini AI
+        const orderData = await parseWithGemini(
+          geminiKey,
+          `From: ${from}\nSubject: ${subject}\nDate: ${receivedAt}\n\nEmail content:\n${bodyText.substring(0, 6000)}`,
+        );
+
+        if (orderData.skip) {
+          skipped++;
+          return;
+        }
+
+        const platform = pick(orderData.platform, [...PLATFORMS, "Other"], "Other");
+        const senderName = from.replace(/<.*>/, "").replace(/"/g, "").trim();
+
+        // 6. Upsert into Supabase using admin client (bypasses RLS).
+        //    NOT NULL columns get safe fallbacks so a partial AI extraction doesn't drop the order.
+        const { data: savedOrder, error: saveError } = await adminClient
           .from("orders")
-          .insert({
-            user_id: user.id,
-            platform: orderData.platform,
-            merchant: orderData.merchant,
-            order_id: orderData.order_id,
-            status: orderData.status,
-            total_amount: orderData.total_amount,
-            currency: orderData.currency || "INR",
-            category: orderData.category,
-            tracking_number: orderData.tracking_number,
-            order_date: orderData.order_date || new Date().toISOString(),
-            expected_delivery: orderData.expected_delivery,
-            payment_method: orderData.payment_method,
-            email_message_id: message.id,
-          })
+          .upsert(
+            {
+              user_id: user.id,
+              platform,
+              merchant: orderData.merchant || (platform !== "Other" ? platform : senderName) || "Unknown",
+              order_id: orderData.order_id || null,
+              status: pick(orderData.status, STATUSES, "ordered"),
+              total_amount: toNumber(orderData.total_amount),
+              currency: /^[A-Z]{3}$/.test(orderData.currency ?? "") ? orderData.currency : "INR",
+              category: pick(orderData.category, CATEGORIES, "shopping"),
+              tracking_number: orderData.tracking_number || null,
+              order_date: toIsoOrNull(orderData.order_date) || receivedAt,
+              expected_delivery: toIsoOrNull(orderData.expected_delivery),
+              payment_method: orderData.payment_method || null,
+              email_message_id: message.id,
+              raw_email_snippet: `${subject}\n${bodyText.substring(0, 500)}`,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "email_message_id" },
+          )
           .select()
           .single();
 
-        if (insertError) {
-          console.error("Insert error:", insertError);
-          continue;
+        if (saveError) {
+          throw new Error(`DB save failed: ${saveError.message}`);
         }
 
-        if (orderData.products && orderData.products.length > 0) {
-          const productsToInsert = orderData.products.map((p: any) => ({
-            order_id: insertedOrder.id,
-            name: p.name,
-            quantity: p.quantity,
-            price: p.price,
-          }));
-          await adminClient.from("order_products").insert(productsToInsert);
+        const products = Array.isArray(orderData.products) ? orderData.products.filter((p: any) => p?.name) : [];
+        await adminClient.from("order_products").delete().eq("order_id", savedOrder.id);
+        if (products.length > 0) {
+          const { error: productsError } = await adminClient.from("order_products").insert(
+            products.map((p: any) => ({
+              order_id: savedOrder.id,
+              name: String(p.name),
+              quantity: Math.max(1, Math.round(toNumber(p.quantity)) || 1),
+              price: toNumber(p.price),
+            })),
+          );
+          if (productsError) console.error("Products insert error:", message.id, productsError);
         }
 
         parsedOrders.push(orderData);
-      } catch (err) {
-        console.error("Failed to parse email", message.id, err);
+        console.log(`Saved order from ${message.id} in ${Date.now() - startedAt}ms`);
+      } catch (err: any) {
+        if (err instanceof GmailAuthError || err instanceof FatalSyncError) throw err;
+        if (err instanceof GeminiBusyError) {
+          console.warn("Deferring email", message.id, err.message);
+          deferred++;
+          return;
+        }
+        console.error("Failed to process email", message.id, err);
+        errors.push(`${message.id}: ${err.message}`);
       }
-    }
+    };
+
+    const queue = [...messages];
+    await Promise.all(
+      Array.from({ length: CONCURRENCY }, async () => {
+        for (let message = queue.shift(); message; message = queue.shift()) {
+          await processMessage(message);
+        }
+      }),
+    );
+    console.log(
+      `Batch done in ${Date.now() - requestStartedAt}ms: ${parsedOrders.length} saved, ${skipped} skipped, ${errors.length} failed, ${deferred} deferred`,
+    );
+
+    await adminClient.from("gmail_sync_state").upsert({
+      user_id: user.id,
+      last_synced_at: new Date().toISOString(),
+      total_emails_processed: (syncState?.total_emails_processed ?? 0) + messages.length,
+    });
 
     return new Response(
-      JSON.stringify({ 
-        success: true, 
-        processed: messages.length, 
+      JSON.stringify({
+        success: true,
+        processed: messages.length,
+        skipped,
+        deferred,
         orders: parsedOrders,
-        nextPageToken: nextPageToken
+        errors,
+        nextPageToken,
       }),
       {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      },
     );
   } catch (error: any) {
     console.error("Edge function error:", error);
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ error: error.message, reauth: error instanceof GmailAuthError }),
+      {
+        status: error instanceof GmailAuthError ? 401 : 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    );
   }
 });

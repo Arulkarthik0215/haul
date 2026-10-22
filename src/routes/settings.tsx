@@ -12,6 +12,18 @@ export const Route = createFileRoute("/settings")({
   component: SettingsPage,
 });
 
+interface SyncResponse {
+  success?: boolean;
+  processed?: number;
+  orders?: unknown[];
+  errors?: string[];
+  deferred?: number;
+  nextPageToken?: string;
+  error?: string;
+  message?: string;
+  reauth?: boolean;
+}
+
 function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const [notifications, setNotifications] = useState(true);
@@ -35,12 +47,8 @@ function SettingsPage() {
     setSyncing(true);
     setSyncResult(null);
     try {
+      // Optional fast path — the edge function falls back to the stored Google refresh token
       const providerToken = getProviderToken();
-
-      if (!providerToken) {
-        setSyncResult("Google token expired. Please log out and sign in again to re-authorize.");
-        return;
-      }
 
       // Force a session refresh to get a valid access token
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
@@ -53,13 +61,18 @@ function SettingsPage() {
       let nextPageToken: string | undefined = undefined;
       let totalProcessed = 0;
       let totalOrders = 0;
+      let totalErrors = 0;
+      let totalDeferred = 0;
+      let firstError: string | undefined;
       let pagesFetched = 0;
-      const MAX_PAGES = 5; // Safety limit: process up to 100 emails per sync click
+      let failed = false;
+      const PAGE_SIZE = 4; // Small batches keep each edge function call within its CPU/time limits
+      const MAX_PAGES = 25; // Safety limit: process up to ~100 emails per sync click
 
       do {
         setSyncResult(`Syncing... Processed ${totalProcessed} emails so far.`);
         
-        const res = await fetch(
+        const res: Response = await fetch(
           `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-gmail`,
           {
             method: 'POST',
@@ -70,20 +83,29 @@ function SettingsPage() {
             },
             body: JSON.stringify({ 
               provider_token: providerToken,
-              page_token: nextPageToken 
+              page_token: nextPageToken,
+              page_size: PAGE_SIZE,
             }),
           }
         );
 
-        const result = await res.json();
+        const result: SyncResponse = await res.json();
 
         if (!res.ok || result.error) {
-          setSyncResult(`Sync error: ${result.error || result.message || res.statusText}`);
+          setSyncResult(
+            result.reauth
+              ? `${result.error} Please sign out and sign in again to re-authorize Gmail.`
+              : `Sync error: ${result.error || result.message || res.statusText}`,
+          );
+          failed = true;
           break; // Stop on error
         }
 
         totalProcessed += result.processed || 0;
         totalOrders += result.orders?.length || 0;
+        totalErrors += result.errors?.length || 0;
+        totalDeferred += result.deferred || 0;
+        firstError ??= result.errors?.[0];
         nextPageToken = result.nextPageToken;
         pagesFetched++;
 
@@ -92,10 +114,19 @@ function SettingsPage() {
 
       } while (nextPageToken && pagesFetched < MAX_PAGES);
 
-      if (pagesFetched >= MAX_PAGES && nextPageToken) {
-        setSyncResult(`Synced! Processed ${totalProcessed} emails, found ${totalOrders} orders. Click Sync again to fetch more older history.`);
+      const errorNote = totalErrors
+        ? ` ${totalErrors} email(s) failed to parse (e.g. ${firstError}).`
+        : "";
+      const deferredNote = totalDeferred
+        ? ` ${totalDeferred} email(s) postponed (Gemini busy) — click Sync again later to pick them up.`
+        : "";
+
+      if (failed) {
+        // keep the error message
+      } else if (pagesFetched >= MAX_PAGES && nextPageToken) {
+        setSyncResult(`Synced! Processed ${totalProcessed} emails, found ${totalOrders} orders.${errorNote}${deferredNote} Click Sync again to fetch more older history.`);
       } else {
-        setSyncResult(`Sync complete! Processed ${totalProcessed} emails, found ${totalOrders} orders.`);
+        setSyncResult(`Sync complete! Processed ${totalProcessed} emails, found ${totalOrders} orders.${errorNote}${deferredNote}`);
       }
 
     } catch (e: any) {

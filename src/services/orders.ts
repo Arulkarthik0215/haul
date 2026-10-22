@@ -1,6 +1,48 @@
 import { supabase } from "@/lib/supabase";
 import { mockOrders } from "@/lib/mock-data";
-import type { Order } from "@/types/order";
+import type { Order, Product, TimelineEvent } from "@/types/order";
+
+// The DB uses snake_case columns; the UI works with the camelCase Order interface.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapOrderRow(row: any): Order {
+  return {
+    id: row.id,
+    platform: row.platform,
+    merchant: row.merchant,
+    orderId: row.order_id ?? "",
+    status: row.status,
+    totalAmount: Number(row.total_amount ?? 0),
+    currency: row.currency || "INR",
+    category: row.category,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    products: (row.products ?? []).map((p: any): Product => ({
+      id: p.id,
+      name: p.name,
+      quantity: p.quantity ?? 1,
+      price: Number(p.price ?? 0),
+      image: p.image_url ?? undefined,
+    })),
+    trackingNumber: row.tracking_number ?? undefined,
+    trackingUrl: row.tracking_url ?? undefined,
+    orderDate: row.order_date,
+    expectedDelivery: row.expected_delivery ?? undefined,
+    deliveredDate: row.delivered_date ?? undefined,
+    returnDeadline: row.return_deadline ?? undefined,
+    invoiceUrl: row.invoice_url ?? undefined,
+    paymentMethod: row.payment_method ?? "",
+    emailMessageId: row.email_message_id ?? "",
+    timeline: (row.timeline ?? [])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .map((t: any): TimelineEvent => ({
+        id: t.id,
+        type: t.event_type,
+        title: t.title,
+        timestamp: t.timestamp,
+        description: t.description ?? undefined,
+      }))
+      .sort((a: TimelineEvent, b: TimelineEvent) => a.timestamp.localeCompare(b.timestamp)),
+  };
+}
 
 export async function fetchOrders(): Promise<Order[]> {
   if (!supabase) {
@@ -22,8 +64,7 @@ export async function fetchOrders(): Promise<Order[]> {
     throw error;
   }
 
-  // Map DB structure to Order interface if needed
-  return (data || []) as unknown as Order[];
+  return (data || []).map(mapOrderRow);
 }
 
 export async function fetchOrderById(id: string): Promise<Order | null> {
@@ -47,5 +88,5 @@ export async function fetchOrderById(id: string): Promise<Order | null> {
     throw error;
   }
 
-  return data as unknown as Order;
+  return mapOrderRow(data);
 }
