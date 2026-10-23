@@ -6,7 +6,13 @@ import { supabase } from "@/lib/supabase";
 import { useTheme } from "@/hooks/use-theme";
 import { useSignOut } from "@/hooks/use-auth";
 import { PageContainer, PageHeader } from "@/components/page-header";
-import { LastSynced, SyncButton, useSyncState } from "@/components/sync-provider";
+import {
+  LastSynced,
+  SyncButton,
+  useAutoSyncSetting,
+  useSyncState,
+} from "@/components/sync-provider";
+import { Switch } from "@/components/ui/switch";
 import { UserChip } from "@/components/user-chip";
 import { cn } from "@/lib/utils";
 
@@ -58,6 +64,7 @@ function SettingsPage() {
             </div>
             <SyncButton />
           </div>
+          <AutoSyncToggle />
           <SkippedEmails />
         </Section>
 
@@ -251,5 +258,21 @@ function DeleteMyData() {
           </button>
         ))}
     </div>
+  );
+}
+
+function AutoSyncToggle() {
+  const [enabled, setEnabled] = useAutoSyncSetting();
+  return (
+    <label className="mt-5 flex cursor-pointer items-center justify-between gap-4 rounded-md bg-background px-4 py-3">
+      <span>
+        <span className="block text-sm font-medium">Sync automatically</span>
+        <span className="block text-sm text-muted-foreground">
+          When Haul is open, check for new orders every 30 minutes — quietly, without the sync
+          window. Applies to this browser.
+        </span>
+      </span>
+      <Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Sync automatically" />
+    </label>
   );
 }

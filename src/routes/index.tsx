@@ -323,8 +323,9 @@ function Landing() {
                 from those it keeps just the order details.
               </Faq>
               <Faq q="How do new orders show up?">
-                Press Sync whenever you like. Each sync picks up new order emails and skips the ones
-                already in your list, so it's quick to run again.
+                Automatically: while Haul is open, it quietly checks for new order emails every 30
+                minutes. You can also press Sync any time. Emails already in your list are skipped,
+                so each sync is quick.
               </Faq>
               <Faq q="What if an order looks wrong?">
                 Order emails come in many formats, so now and then a detail can be missed. Open the

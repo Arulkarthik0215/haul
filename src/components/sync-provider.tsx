@@ -11,6 +11,8 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { AlertTriangle, Check, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
+import { Toaster } from "@/components/ui/sonner";
 import { supabase, getProviderToken } from "@/lib/supabase";
 import { relativePhrase } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -19,13 +21,48 @@ const PAGE_SIZE = 10; // Emails per function call; the function reads them in gr
 const MAX_PAGES = 10; // Safety limit: process up to ~100 emails per sync
 const MAX_RETRIES_PER_PAGE = 3;
 
+// Automatic sync: when the app is open and the last sync is older than this, sync quietly
+const AUTO_SYNC_AFTER_MS = 30 * 60 * 1000;
+const AUTO_SYNC_CHECK_EVERY_MS = 5 * 60 * 1000;
+// New emails are at the top of the inbox, so a background sync only needs the first few pages
+const AUTO_SYNC_MAX_PAGES = 3;
+const AUTO_SYNC_KEY = "haul-auto-sync";
+
+function autoSyncEnabled() {
+  try {
+    return localStorage.getItem(AUTO_SYNC_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+/** The per-device "sync automatically" preference (stored in this browser). */
+export function useAutoSyncSetting() {
+  const [enabled, setEnabled] = useState(true);
+  useEffect(() => setEnabled(autoSyncEnabled()), []);
+  const update = (next: boolean) => {
+    try {
+      localStorage.setItem(AUTO_SYNC_KEY, next ? "on" : "off");
+    } catch {
+      // storage unavailable — the choice just won't persist
+    }
+    setEnabled(next);
+  };
+  return [enabled, update] as const;
+}
+
 interface SyncResponse {
   success?: boolean;
   processed?: number;
   orders?: unknown[];
   errors?: string[];
   deferred?: number;
-  skip_reasons?: { already_synced?: number; not_an_order?: number; no_text?: number };
+  skip_reasons?: {
+    already_synced?: number;
+    previously_skipped?: number;
+    not_an_order?: number;
+    no_text?: number;
+  };
   not_order_subjects?: string[];
   deferred_reason?: string | null;
   retry_after?: number;
@@ -72,6 +109,8 @@ const initialRun: SyncRun = {
 interface SyncContextValue {
   run: SyncRun;
   syncing: boolean;
+  /** A quiet automatic sync is running (no dialog). */
+  backgroundSyncing: boolean;
   startSync: () => void;
 }
 
@@ -101,13 +140,42 @@ export function useSyncState() {
   });
 }
 
+/** One call to the sync-gmail function: reads the next page of matching emails. */
+async function requestSyncPage(accessToken: string, pageToken: string | undefined) {
+  const res: Response = await fetch(
+    `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-gmail`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify({
+        // Optional fast path — the edge function falls back to the stored Google refresh token
+        provider_token: getProviderToken(),
+        page_token: pageToken,
+        page_size: PAGE_SIZE,
+      }),
+    },
+  );
+  const result: SyncResponse = await res.json().catch(() => ({ error: res.statusText }));
+  return { ok: res.ok && !result.error, status: res.status, result };
+}
+
 export function SyncProvider({ children }: { children: ReactNode }) {
   const [run, setRun] = useState<SyncRun>(initialRun);
   const queryClient = useQueryClient();
   const running = useRef(false);
+  const [backgroundSyncing, setBackgroundSyncing] = useState(false);
+  // A manual sync requested while a background one runs starts as soon as it finishes
+  const manualRequested = useRef(false);
 
   const startSync = useCallback(async () => {
-    if (running.current) return;
+    if (running.current) {
+      manualRequested.current = true;
+      return;
+    }
     running.current = true;
     setRun({ ...initialRun, phase: "syncing" });
 
@@ -128,8 +196,6 @@ export function SyncProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // Optional fast path — the edge function falls back to the stored Google refresh token
-      const providerToken = getProviderToken();
       let pageToken: string | undefined;
       let hasMore = true;
       let pages = 0;
@@ -137,29 +203,13 @@ export function SyncProvider({ children }: { children: ReactNode }) {
       let savedThisPage = 0;
 
       while (hasMore && pages < MAX_PAGES) {
-        const res: Response = await fetch(
-          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-gmail`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${session.access_token}`,
-              "Content-Type": "application/json",
-              apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-            },
-            body: JSON.stringify({
-              provider_token: providerToken,
-              page_token: pageToken,
-              page_size: PAGE_SIZE,
-            }),
-          },
-        );
-        const result: SyncResponse = await res.json().catch(() => ({ error: res.statusText }));
+        const { ok, status, result } = await requestSyncPage(session.access_token, pageToken);
 
-        if (!res.ok || result.error) {
+        if (!ok) {
           fail(
             result.reauth
               ? `${result.error} Please sign in again to re-authorize Gmail.`
-              : result.error || result.message || `Request failed (${res.status})`,
+              : result.error || result.message || `Request failed (${status})`,
             !!result.reauth,
           );
           return;
@@ -220,10 +270,98 @@ export function SyncProvider({ children }: { children: ReactNode }) {
     }
   }, [queryClient]);
 
+  /**
+   * Quiet sync: newest emails only, no dialog. Stops at the first page with nothing new, and on
+   * any error or AI rate limit (the next automatic or manual sync simply picks up from there).
+   */
+  const backgroundSync = useCallback(async () => {
+    if (running.current || !supabase) return;
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!session) return;
+
+    running.current = true;
+    setBackgroundSyncing(true);
+    let found = 0;
+    try {
+      let pageToken: string | undefined;
+      for (let page = 0; page < AUTO_SYNC_MAX_PAGES; page++) {
+        const { ok, result } = await requestSyncPage(session.access_token, pageToken);
+        if (!ok) {
+          console.warn("Automatic sync stopped:", result.error || result.message);
+          break;
+        }
+        const saved = result.orders?.length || 0;
+        found += saved;
+        if (saved > 0) queryClient.invalidateQueries({ queryKey: ["orders"] });
+
+        const reasons = result.skip_reasons ?? {};
+        const newEmails =
+          (result.processed || 0) -
+          (reasons.already_synced || 0) -
+          (reasons.previously_skipped || 0);
+        if ((result.deferred || 0) > 0 || newEmails <= 0 || !result.nextPageToken) break;
+        pageToken = result.nextPageToken;
+      }
+      if (found > 0) {
+        toast(`${found} new order${found === 1 ? "" : "s"} found`, {
+          description: "Your inbox was synced automatically.",
+        });
+      }
+    } catch (e) {
+      console.warn("Automatic sync failed:", e);
+    } finally {
+      running.current = false;
+      setBackgroundSyncing(false);
+      queryClient.invalidateQueries({ queryKey: ["sync-state"] });
+      if (manualRequested.current) {
+        manualRequested.current = false;
+        startSync();
+      }
+    }
+  }, [queryClient, startSync]);
+
+  // Decide when to sync automatically: on open, when the tab becomes visible again, and every few
+  // minutes while it stays open — only if the last sync is old enough. A first-ever sync stays
+  // manual, since it reads the whole history and is worth watching.
+  const { data: syncState, isSuccess: syncStateLoaded } = useSyncState();
+  const lastSyncedAt = useRef<string | null>(null);
+  lastSyncedAt.current = syncState?.last_synced_at ?? null;
+
+  useEffect(() => {
+    if (!syncStateLoaded) return;
+    const maybeAutoSync = () => {
+      if (!autoSyncEnabled() || document.visibilityState !== "visible") return;
+      const last = lastSyncedAt.current;
+      if (!last || Date.now() - new Date(last).getTime() < AUTO_SYNC_AFTER_MS) return;
+      backgroundSync();
+    };
+    maybeAutoSync();
+    document.addEventListener("visibilitychange", maybeAutoSync);
+    const timer = setInterval(maybeAutoSync, AUTO_SYNC_CHECK_EVERY_MS);
+    return () => {
+      document.removeEventListener("visibilitychange", maybeAutoSync);
+      clearInterval(timer);
+    };
+  }, [syncStateLoaded, backgroundSync]);
+
   return (
-    <SyncContext.Provider value={{ run, syncing: run.phase === "syncing", startSync }}>
+    <SyncContext.Provider
+      value={{ run, syncing: run.phase === "syncing", backgroundSyncing, startSync }}
+    >
       {children}
       <SyncDialog run={run} onClose={() => setRun(initialRun)} onRetry={startSync} />
+      <Toaster
+        position="bottom-right"
+        toastOptions={{
+          classNames: {
+            toast:
+              "!rounded-lg !border-0 !bg-popover !text-popover-foreground !shadow-[var(--shadow-soft)]",
+            description: "!text-muted-foreground",
+          },
+        }}
+      />
     </SyncContext.Provider>
   );
 }
@@ -494,8 +632,9 @@ export function SyncButton({
   variant?: "primary" | "quiet" | "icon";
   className?: string;
 }) {
-  const { syncing, startSync } = useSync();
-  const icon = <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />;
+  const { syncing, backgroundSyncing, startSync } = useSync();
+  const busy = syncing || backgroundSyncing;
+  const icon = <RefreshCw className={cn("h-4 w-4", busy && "animate-spin")} />;
 
   if (variant === "icon") {
     return (
@@ -515,9 +654,14 @@ export function SyncButton({
 
   const Btn = variant === "primary" ? PrimaryButton : QuietButton;
   return (
-    <Btn onClick={startSync} disabled={syncing} className={className}>
+    <Btn
+      onClick={startSync}
+      disabled={syncing}
+      className={className}
+      title={backgroundSyncing ? "Checking for new orders — click for a full sync" : undefined}
+    >
       {icon}
-      {syncing ? "Syncing…" : "Sync inbox"}
+      {busy ? "Syncing…" : "Sync inbox"}
     </Btn>
   );
 }
