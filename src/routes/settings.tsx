@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ExternalLink, LogOut, Moon, Sun } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -94,16 +94,28 @@ function SettingsPage() {
           <ul className="space-y-2 text-sm text-muted-foreground">
             <li>Only the order details are stored — never your full emails.</li>
             <li>Your orders are visible only to you, enforced by the database itself.</li>
-            <li>Nothing is shared or sold.</li>
+            <li>
+              Email text is read by AI services only to find order details. Your data is never sold
+              or used for ads.
+            </li>
           </ul>
-          <a
-            href="https://myaccount.google.com/permissions"
-            target="_blank"
-            rel="noreferrer"
-            className="mt-4 inline-flex items-center gap-1.5 text-sm font-semibold text-primary hover:underline"
-          >
-            Manage Google access <ExternalLink className="h-3.5 w-3.5" />
-          </a>
+          <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-sm font-semibold">
+            <a
+              href="https://myaccount.google.com/permissions"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 text-primary hover:underline"
+            >
+              Manage Google access <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+            <Link to="/privacy" className="text-primary hover:underline">
+              Privacy policy
+            </Link>
+            <Link to="/terms" className="text-primary hover:underline">
+              Terms
+            </Link>
+          </div>
+          <DeleteMyData />
         </Section>
       </div>
     </PageContainer>
@@ -174,6 +186,70 @@ function SkippedEmails() {
           {recheck.isPending ? "Clearing…" : "Re-check them"}
         </button>
       )}
+    </div>
+  );
+}
+
+/** Removes everything Haul stored for this user (orders cascade to products and timeline). */
+function DeleteMyData() {
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const [done, setDone] = useState(false);
+  const wipe = useMutation({
+    mutationFn: async () => {
+      const { data } = await supabase!.auth.getUser();
+      const userId = data.user!.id;
+      for (const table of ["orders", "skipped_emails", "gmail_sync_state"] as const) {
+        const { error } = await supabase!.from(table).delete().eq("user_id", userId);
+        if (error) throw error;
+      }
+    },
+    onSuccess: () => {
+      setDone(true);
+      setConfirming(false);
+      queryClient.invalidateQueries();
+    },
+  });
+
+  return (
+    <div className="mt-6 border-t border-border pt-5">
+      <div className="text-sm font-semibold">Delete my data</div>
+      <p className="mt-1 text-sm text-muted-foreground">
+        {done
+          ? "Done — your orders, sync history and stored Google token have been deleted."
+          : "Removes all your orders, skipped-email records, sync history and the stored Google token. This can't be undone."}
+      </p>
+      {wipe.error && (
+        <p className="mt-2 text-sm text-bad" role="alert">
+          Couldn't delete everything: {(wipe.error as Error).message}
+        </p>
+      )}
+      {!done &&
+        (confirming ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              onClick={() => wipe.mutate()}
+              disabled={wipe.isPending}
+              className="inline-flex h-10 items-center rounded-md bg-bad px-4 text-sm font-semibold text-white disabled:opacity-50"
+            >
+              {wipe.isPending ? "Deleting…" : "Yes, delete everything"}
+            </button>
+            <button
+              onClick={() => setConfirming(false)}
+              disabled={wipe.isPending}
+              className="inline-flex h-10 items-center rounded-md bg-surface-2 px-4 text-sm font-semibold"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirming(true)}
+            className="mt-3 inline-flex h-10 items-center rounded-md bg-surface-2 px-4 text-sm font-semibold text-bad transition-colors hover:bg-bad hover:text-white"
+          >
+            Delete my data…
+          </button>
+        ))}
     </div>
   );
 }

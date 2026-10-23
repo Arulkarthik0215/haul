@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, type ReactNode } from "react";
 import { Check, ChevronDown, Lock, MailCheck, ShieldCheck, X } from "lucide-react";
 import { useAuthSession, useSignIn } from "@/hooks/use-auth";
@@ -296,6 +296,13 @@ function Landing() {
             >
               Google account settings
             </a>
+            . Full details are in the{" "}
+            <Link
+              to="/privacy"
+              className="font-semibold text-foreground underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground"
+            >
+              privacy policy
+            </Link>
             .
           </p>
         </section>
@@ -363,6 +370,12 @@ function Landing() {
             <a href="#faq" className="hover:text-foreground">
               Questions
             </a>
+            <Link to="/privacy" className="hover:text-foreground">
+              Privacy policy
+            </Link>
+            <Link to="/terms" className="hover:text-foreground">
+              Terms
+            </Link>
           </nav>
           <p>© {new Date().getFullYear()} Haul</p>
         </div>

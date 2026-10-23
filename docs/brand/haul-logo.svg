@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Haul</title>
+  <rect width="512" height="512" rx="116" fill="#16171a"/>
+  <g fill="#ffffff">
+    <rect x="116" y="130" width="76" height="252" rx="10"/>
+    <rect x="320" y="130" width="76" height="252" rx="10"/>
+  </g>
+  <rect x="191" y="224" width="130" height="64" fill="#8fa8ff"/>
+</svg>

@@ -138,7 +138,7 @@ function AppShell() {
   const router = useRouter();
   const { data: session, isLoading } = useAuthSession();
   // The landing page is public; everything else is the signed-in app
-  const isPublic = pathname === "/" || pathname === "/login";
+  const isPublic = ["/", "/login", "/privacy", "/terms"].includes(pathname);
 
   useEffect(() => {
     if (!isPublic && !isLoading && !session) {
