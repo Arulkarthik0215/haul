@@ -1,6 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ExternalLink, LogOut, Moon, Sun } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { supabase } from "@/lib/supabase";
 import { useTheme } from "@/hooks/use-theme";
 import { useSignOut } from "@/hooks/use-auth";
 import { PageContainer, PageHeader } from "@/components/page-header";
@@ -56,6 +58,7 @@ function SettingsPage() {
             </div>
             <SyncButton />
           </div>
+          <SkippedEmails />
         </Section>
 
         <Section title="Appearance">
@@ -122,5 +125,55 @@ function Section({
       {description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}
       <div className="mt-5">{children}</div>
     </section>
+  );
+}
+
+/** Emails judged "not an order" are skipped on later syncs; this lets the user have them re-read. */
+function SkippedEmails() {
+  const queryClient = useQueryClient();
+  const [cleared, setCleared] = useState(false);
+  const { data: count = 0 } = useQuery({
+    queryKey: ["skipped-emails-count"],
+    enabled: !!supabase,
+    queryFn: async () => {
+      const { count } = await supabase!
+        .from("skipped_emails")
+        .select("email_message_id", { count: "exact", head: true });
+      return count ?? 0;
+    },
+  });
+  const recheck = useMutation({
+    mutationFn: async () => {
+      const { data } = await supabase!.auth.getUser();
+      const { error } = await supabase!
+        .from("skipped_emails")
+        .delete()
+        .eq("user_id", data.user!.id);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      setCleared(true);
+      queryClient.invalidateQueries({ queryKey: ["skipped-emails-count"] });
+    },
+  });
+
+  if (count === 0 && !cleared) return null;
+  return (
+    <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md bg-background px-4 py-3 text-sm">
+      <span className="text-muted-foreground">
+        {cleared
+          ? "Done — the next sync will read those emails again."
+          : `${count.toLocaleString("en-IN")} emails were judged not to be orders and are skipped on future syncs.`}
+      </span>
+      {!cleared && (
+        <button
+          onClick={() => recheck.mutate()}
+          disabled={recheck.isPending}
+          className="font-semibold text-primary hover:underline disabled:opacity-50"
+        >
+          {recheck.isPending ? "Clearing…" : "Re-check them"}
+        </button>
+      )}
+    </div>
   );
 }

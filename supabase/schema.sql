@@ -71,3 +71,16 @@ CREATE POLICY "Users see own sync state" ON gmail_sync_state
 -- Google OAuth refresh token so the sync-gmail function can renew Gmail access
 -- (run this on existing databases too)
 ALTER TABLE gmail_sync_state ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
+
+-- Emails already judged "not an order", so later syncs skip them without asking the AI again
+CREATE TABLE IF NOT EXISTS skipped_emails (
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  email_message_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  subject TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (user_id, email_message_id)
+);
+ALTER TABLE skipped_emails ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users see own skipped emails" ON skipped_emails
+  FOR ALL USING (auth.uid() = user_id);

@@ -15,8 +15,9 @@ import { supabase, getProviderToken } from "@/lib/supabase";
 import { relativePhrase } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-const PAGE_SIZE = 4; // Small batches keep each edge function call within its CPU/time limits
-const MAX_PAGES = 25; // Safety limit: process up to ~100 emails per sync
+const PAGE_SIZE = 10; // Emails per function call; the function reads them in groups of 5 per AI request
+const MAX_PAGES = 10; // Safety limit: process up to ~100 emails per sync
+const MAX_RETRIES_PER_PAGE = 3;
 
 interface SyncResponse {
   success?: boolean;
@@ -24,6 +25,10 @@ interface SyncResponse {
   orders?: unknown[];
   errors?: string[];
   deferred?: number;
+  skip_reasons?: { already_synced?: number; not_an_order?: number; no_text?: number };
+  not_order_subjects?: string[];
+  deferred_reason?: string | null;
+  retry_after?: number;
   nextPageToken?: string;
   error?: string;
   message?: string;
@@ -39,6 +44,11 @@ interface SyncRun {
   ordersFound: number;
   failed: number;
   deferred: number;
+  alreadySynced: number;
+  notOrders: number;
+  notOrderSubjects: string[];
+  deferredReason?: string;
+  waitingUntil?: number;
   firstError?: string;
   moreAvailable: boolean;
   errorMessage?: string;
@@ -52,6 +62,9 @@ const initialRun: SyncRun = {
   ordersFound: 0,
   failed: 0,
   deferred: 0,
+  alreadySynced: 0,
+  notOrders: 0,
+  notOrderSubjects: [],
   moreAvailable: false,
   needsSignIn: false,
 };
@@ -111,19 +124,19 @@ export function SyncProvider({ children }: { children: ReactNode }) {
         data: { session },
       } = await supabase.auth.getSession();
       if (!session) {
-        fail(
-          "You're not signed in. Sign in with Google so Haul can read your order emails.",
-          true,
-        );
+        fail("You're not signed in. Sign in with Google so Haul can read your order emails.", true);
         return;
       }
 
       // Optional fast path — the edge function falls back to the stored Google refresh token
       const providerToken = getProviderToken();
-      let nextPageToken: string | undefined;
+      let pageToken: string | undefined;
+      let hasMore = true;
       let pages = 0;
+      let retries = 0; // retries of the current page after Gemini asked us to slow down
+      let savedThisPage = 0;
 
-      do {
+      while (hasMore && pages < MAX_PAGES) {
         const res: Response = await fetch(
           `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-gmail`,
           {
@@ -135,7 +148,7 @@ export function SyncProvider({ children }: { children: ReactNode }) {
             },
             body: JSON.stringify({
               provider_token: providerToken,
-              page_token: nextPageToken,
+              page_token: pageToken,
               page_size: PAGE_SIZE,
             }),
           },
@@ -152,23 +165,51 @@ export function SyncProvider({ children }: { children: ReactNode }) {
           return;
         }
 
-        pages++;
-        nextPageToken = result.nextPageToken;
-        setRun((r) => ({
+        const found = result.orders?.length || 0;
+        const common = (r: SyncRun): SyncRun => ({
           ...r,
+          ordersFound: r.ordersFound + found,
+          failed: r.failed + (result.errors?.length || 0),
+          notOrders: r.notOrders + (result.skip_reasons?.not_an_order || 0),
+          notOrderSubjects: [...r.notOrderSubjects, ...(result.not_order_subjects ?? [])].slice(
+            0,
+            12,
+          ),
+          firstError: r.firstError ?? result.errors?.[0],
+          deferredReason: result.deferred_reason ?? r.deferredReason,
+        });
+        queryClient.invalidateQueries({ queryKey: ["orders"] });
+
+        // Gemini rate-limited part of this batch: wait as asked, then redo the same page
+        if ((result.deferred || 0) > 0 && retries < MAX_RETRIES_PER_PAGE) {
+          retries++;
+          savedThisPage += found;
+          const waitMs = Math.min(Math.max(result.retry_after || 15, 5), 60) * 1000;
+          setRun((r) => ({ ...common(r), waitingUntil: Date.now() + waitMs }));
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+          setRun((r) => ({ ...r, waitingUntil: undefined }));
+          continue;
+        }
+
+        pages++;
+        pageToken = result.nextPageToken;
+        hasMore = !!pageToken;
+        const alreadySynced = Math.max(
+          0,
+          (result.skip_reasons?.already_synced || 0) - savedThisPage,
+        );
+        retries = 0;
+        savedThisPage = 0;
+        setRun((r) => ({
+          ...common(r),
           pages,
           processed: r.processed + (result.processed || 0),
-          ordersFound: r.ordersFound + (result.orders?.length || 0),
-          failed: r.failed + (result.errors?.length || 0),
           deferred: r.deferred + (result.deferred || 0),
-          firstError: r.firstError ?? result.errors?.[0],
+          alreadySynced: r.alreadySynced + alreadySynced,
         }));
+      }
 
-        // Show new orders as they arrive
-        queryClient.invalidateQueries({ queryKey: ["orders"] });
-      } while (nextPageToken && pages < MAX_PAGES);
-
-      setRun((r) => ({ ...r, phase: "done", moreAvailable: !!nextPageToken }));
+      setRun((r) => ({ ...r, phase: "done", moreAvailable: hasMore }));
     } catch (e) {
       console.error(e);
       fail(e instanceof Error ? e.message : "Something went wrong while syncing.");
@@ -198,6 +239,14 @@ function SyncDialog({
 }) {
   const navigate = useNavigate();
   const syncing = run.phase === "syncing";
+  const [now, setNow] = useState(() => Date.now());
+
+  // Tick once a second while we're waiting out a rate limit, so the countdown moves
+  useEffect(() => {
+    if (!run.waitingUntil) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [run.waitingUntil]);
 
   // Leaving the page mid-sync would cut the batch loop short — ask first
   useEffect(() => {
@@ -233,9 +282,11 @@ function SyncDialog({
               </DialogPrimitive.Description>
               <ProgressBar value={run.pages === 0 ? null : progress} />
               <p className="mt-3 text-xs tabular-nums text-muted-foreground" aria-live="polite">
-                {run.pages === 0
-                  ? "Connecting to Gmail…"
-                  : `${run.processed} emails checked · ${run.ordersFound} order${run.ordersFound === 1 ? "" : "s"} found`}
+                {run.waitingUntil
+                  ? `The AI service asked us to slow down — continuing in ${Math.max(0, Math.ceil((run.waitingUntil - now) / 1000))}s`
+                  : run.pages === 0
+                    ? "Connecting to Gmail…"
+                    : `${run.processed} emails checked · ${run.ordersFound} order${run.ordersFound === 1 ? "" : "s"} found`}
               </p>
             </>
           )}
@@ -246,28 +297,52 @@ function SyncDialog({
               <DialogPrimitive.Title className="mt-6 text-xl font-semibold">
                 {run.ordersFound > 0
                   ? `${run.ordersFound} new order${run.ordersFound === 1 ? "" : "s"} found`
-                  : "You're all caught up"}
+                  : run.notOrders > 0 || run.failed > 0
+                    ? "No new orders found"
+                    : "You're all caught up"}
               </DialogPrimitive.Title>
               <DialogPrimitive.Description className="mx-auto mt-2 max-w-xs text-[15px] leading-relaxed text-muted-foreground">
                 Checked {run.processed} email{run.processed === 1 ? "" : "s"}
-                {run.ordersFound === 0 && " — no new orders since your last sync"}.
+                {run.alreadySynced > 0 && ` (${run.alreadySynced} already in your list)`}.
                 {run.moreAvailable && " Sync again to go further back in your inbox."}
               </DialogPrimitive.Description>
-              {(run.deferred > 0 || run.failed > 0) && (
+              {(run.deferred > 0 || run.failed > 0 || run.notOrders > 0) && (
                 <div className="mt-5 space-y-1 rounded-lg bg-surface px-4 py-3 text-left text-xs text-muted-foreground">
                   {run.deferred > 0 && (
                     <p>
                       <span className="font-medium text-foreground">{run.deferred} postponed</span>{" "}
-                      — the AI service was busy. They'll be picked up next sync.
+                      — the AI service kept asking us to slow down. They'll be picked up next sync.
+                      {run.deferredReason && (
+                        <span className="mt-1 block break-words opacity-80">
+                          {run.deferredReason}
+                        </span>
+                      )}
                     </p>
                   )}
                   {run.failed > 0 && (
-                    <p title={run.firstError}>
+                    <p className="break-words">
                       <span className="font-medium text-foreground">
                         {run.failed} couldn't be read
-                      </span>{" "}
-                      — usually emails that aren't really orders.
+                      </span>
+                      {run.firstError && <> — {run.firstError.replace(/^[0-9a-f]+: /, "")}</>}
                     </p>
+                  )}
+                  {run.notOrders > 0 && (
+                    <details>
+                      <summary className="cursor-pointer">
+                        <span className="font-medium text-foreground">
+                          {run.notOrders} weren't orders
+                        </span>{" "}
+                        — ads, reminders and similar. Show which
+                      </summary>
+                      <ul className="mt-2 list-disc space-y-1 pl-4">
+                        {run.notOrderSubjects.map((subject, i) => (
+                          <li key={i} className="break-words">
+                            {subject || "(no subject)"}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
                   )}
                 </div>
               )}

@@ -121,7 +121,9 @@ Open the URL Vite prints (e.g. `http://localhost:8080`).
    npx supabase login
    npx supabase link --project-ref <your-project-ref>
    npx supabase secrets set GEMINI_API_KEY=... GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=...
-   # optional: npx supabase secrets set GEMINI_MODEL=<model-name>
+   # free backup AI (used when Gemini is busy or out of free requests): key from console.groq.com
+   npx supabase secrets set GROQ_API_KEY=...
+   # optional: GEMINI_MODEL / GROQ_MODEL to change models, AI_PROVIDERS=groq,gemini to change the order
    npx supabase functions deploy sync-gmail
    ```
 

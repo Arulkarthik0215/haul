@@ -17,25 +17,56 @@ const CATEGORIES = ["shopping", "food", "grocery", "entertainment", "travel"];
 const GMAIL_QUERY =
   "{category:purchases category:reservations subject:(order OR receipt OR invoice OR purchase OR shipped OR delivery OR booking)}";
 
-// Gemini model is configurable so it can be bumped without a code change when Google retires models
+// Models are configurable so they can be changed without a code change when providers retire them
 const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") || "gemini-3.8-flash";
+const GROQ_MODEL = Deno.env.get("GROQ_MODEL") || "openai/gpt-oss-120b";
+// AI services tried in order; a provider is used only when its API key secret is set
+const AI_PROVIDERS = (Deno.env.get("AI_PROVIDERS") || "gemini,groq")
+  .split(",")
+  .map((p) => p.trim().toLowerCase());
 
 // Supabase limits each request to ~2s CPU / 250MB memory and 150s wall clock, so batches stay
 // small, Gemini calls are capped, and no new email is started after the time budget.
 const TIME_BUDGET_MS = 60_000;
-const GEMINI_TIMEOUT_MS = 25_000;
-const CONCURRENCY = 2;
+const AI_TIMEOUT_MS = 25_000;
+const GMAIL_CONCURRENCY = 3;
+// Emails read per Gemini request — free-tier limits count requests, so batching stretches them
+const AI_BATCH_SIZE = 5;
+// Characters of each email sent to the AI (order details are near the top)
+const AI_TEXT_CHARS = 3000;
 
 class GmailAuthError extends Error {}
 // Config-level failures (bad model, bad key) that would fail every email — abort the batch instead
 class FatalSyncError extends Error {}
-// Gemini overloaded / rate limited / slow — the email is left for the next sync
-class GeminiBusyError extends Error {}
+// An AI service is overloaded / rate limited / slow — try another, or leave the email for the next sync
+class AiBusyError extends Error {
+  constructor(
+    message: string,
+    public retryAfterSec = 20,
+  ) {
+    super(message);
+  }
+}
+
+// An AI service can't be used for the rest of this request (daily limit hit, bad key, missing model)
+class AiUnavailableError extends Error {}
+
+// Reads Google's error details: which quota was hit, and how long it says to wait
+function describeQuota(error: any): { daily: boolean; retryAfterSec: number | null } {
+  const details: any[] = error?.details ?? [];
+  const quotaIds = details
+    .flatMap((d) => (d.violations ?? []).map((v: any) => `${v.quotaId ?? ""} ${v.quotaMetric ?? ""}`))
+    .join(" ");
+  const retry = details.find((d) => String(d["@type"] ?? "").includes("RetryInfo"))?.retryDelay;
+  const retryAfterSec = retry ? Math.ceil(parseFloat(String(retry))) : null;
+  const daily = /PerDay|per_day/i.test(quotaIds) || /per day|daily/i.test(error?.message ?? "");
+  return { daily, retryAfterSec };
+}
 
 // Edge functions have a tight CPU budget, so bodies are decoded lazily and capped in size.
 // Gemini only sees the first ~6000 chars of text anyway.
 const MAX_ENCODED_TEXT = 16_000;
-const MAX_ENCODED_HTML = 200_000;
+const MAX_ENCODED_HTML = 150_000;
 
 function decodeBase64(data: string, maxLength: number): string {
   const trimmed = data.length > maxLength ? data.slice(0, maxLength - (maxLength % 4)) : data;
@@ -79,7 +110,7 @@ function extractBodyText(payload: any): string {
   if (parts.html.length > 0) {
     return stripHtml(decodeBase64(parts.html[0], MAX_ENCODED_HTML));
   }
-  return "";
+  return parts.text.length > 0 ? decodeBase64(parts.text[0], MAX_ENCODED_TEXT).trim() : "";
 }
 
 function getHeader(payload: any, name: string): string {
@@ -145,9 +176,24 @@ async function gmailGet(url: string, accessToken: string): Promise<any> {
   return data;
 }
 
-async function parseWithGemini(apiKey: string, emailText: string): Promise<any> {
-  const prompt = `Extract order information from this email and return JSON matching this shape:
-{
+interface EmailForAI {
+  key: string;
+  from: string;
+  subject: string;
+  date: string;
+  text: string;
+}
+
+// Cheap, AI-free filter for emails that are obviously not orders (subject only, kept conservative)
+const NOT_ORDER_SUBJECT =
+  /\b(otp|one[- ]time password|verification code|security code|password reset|is about to expire|has expired|expired for|expiring soon|bill (is )?due|payment (is )?due|newsletter|webinar|sale ends|limited[- ]time offer|coupon code)\b|\d+% off/i;
+
+/** The extraction instructions plus up to AI_BATCH_SIZE emails, for any provider. */
+function buildBatchPrompt(emails: EmailForAI[]): string {
+  return `You read emails and extract online order details. For EACH email below, return one entry, using this JSON shape:
+{"results": [{
+  "key": "the email's key, copied exactly",
+  "is_order": true or false,
   "platform": one of ${JSON.stringify([...PLATFORMS, "Other"])},
   "merchant": "store name",
   "order_id": "order number",
@@ -160,54 +206,164 @@ async function parseWithGemini(apiKey: string, emailText: string): Promise<any> 
   "order_date": "ISO date",
   "expected_delivery": "ISO date if mentioned, else null",
   "payment_method": "if mentioned, else null"
+}]}
+
+Set "is_order" to true for anything about something the reader bought or booked: order confirmations,
+shipping / out-for-delivery / delivered updates, receipts, invoices, payment receipts, app-store or subscription
+receipts, food or grocery orders, cancellations, refunds, and travel / movie / event bookings.
+Set "is_order" to false only for marketing, newsletters, OTPs, plan-expiry or bill reminders, and other emails
+with no purchase in them. When "is_order" is false, return only "key" and "is_order".
+Reply with the JSON only.
+
+${emails.map((e) => `=== EMAIL key: ${e.key}\nFrom: ${e.from}\nSubject: ${e.subject}\nDate: ${e.date}\n\n${e.text}`).join("\n\n")}`;
 }
 
-If this email is NOT about a purchase/order/receipt/invoice/delivery (e.g. marketing, newsletters, OTPs), return {"skip": true}.
+/** Maps the model's JSON reply back to each email by key. */
+function parseBatchResults(text: string, emails: EmailForAI[]): Map<string, any> {
+  const parsed = JSON.parse(text.replace(/```json/g, "").replace(/```/g, "").trim());
+  const results: any[] = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : [parsed];
+  const byKey = new Map<string, any>();
+  results.forEach((r, i) => byKey.set(String(r?.key ?? emails[i]?.key), r ?? {}));
+  return byKey;
+}
 
-${emailText}`;
-
+async function askGemini(prompt: string): Promise<string> {
+  const apiKey = Deno.env.get("GEMINI_API_KEY") ?? "";
   let res: Response | null = null;
   let data: any = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000));
     try {
-      res = await callGemini(apiKey, prompt);
+      res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+        method: "POST",
+        signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseMimeType: "application/json",
+            // Extraction doesn't need deep reasoning; low thinking keeps each call fast and cheap
+            thinkingConfig: { thinkingLevel: "low" },
+          },
+        }),
+      });
     } catch (err: any) {
-      if (err?.name === "TimeoutError") throw new GeminiBusyError(`Gemini timed out after ${GEMINI_TIMEOUT_MS}ms`);
+      if (err?.name === "TimeoutError") throw new AiBusyError(`Gemini timed out after ${AI_TIMEOUT_MS}ms`);
       throw err;
     }
-    data = await res.json();
-    if (![429, 500, 503].includes(res.status)) break;
+    data = await res.json().catch(() => ({}));
+    // Overloaded servers are worth one quick retry; rate limits are handled by waiting / falling back
+    if (![500, 503].includes(res.status)) break;
   }
   if (!res!.ok) {
-    const msg = `Gemini API error (${GEMINI_MODEL}): ${data.error?.message || res!.status}`;
-    if ([429, 500, 503].includes(res!.status)) throw new GeminiBusyError(msg);
-    if ([400, 401, 403, 404].includes(res!.status) && /model|api key|permission|thinking/i.test(data.error?.message ?? "")) {
-      throw new FatalSyncError(msg);
+    const message = data.error?.message || `HTTP ${res!.status}`;
+    if (res!.status === 429) {
+      const { daily, retryAfterSec } = describeQuota(data.error);
+      if (daily) throw new AiUnavailableError(`Gemini: daily free limit used up (resets around 12:30–1:30 pm IST)`);
+      throw new AiBusyError(`Gemini is rate limited: ${message}`, retryAfterSec ?? 30);
     }
-    throw new Error(msg);
+    if ([500, 503].includes(res!.status)) throw new AiBusyError(`Gemini is overloaded: ${message}`, 15);
+    if ([400, 401, 403, 404].includes(res!.status) && /model|api key|permission|thinking/i.test(message)) {
+      throw new AiUnavailableError(`Gemini (${GEMINI_MODEL}): ${message}`);
+    }
+    throw new Error(`Gemini error: ${message}`);
   }
-
-  const text: string = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? "").join("") ?? "";
-  return JSON.parse(text.replace(/```json/g, "").replace(/```/g, "").trim());
+  return data.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? "").join("") ?? "";
 }
 
-function callGemini(apiKey: string, prompt: string): Promise<Response> {
-  return fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-    {
+async function askGroq(prompt: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
-      signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
-      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+      headers: { Authorization: `Bearer ${Deno.env.get("GROQ_API_KEY") ?? ""}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          // Extraction doesn't need deep reasoning; low thinking keeps each call fast
-          thinkingConfig: { thinkingLevel: "low" },
-        },
+        model: GROQ_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+        temperature: 0,
+        // gpt-oss models think before answering; keep it short
+        ...(GROQ_MODEL.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {}),
       }),
+    });
+  } catch (err: any) {
+    if (err?.name === "TimeoutError") throw new AiBusyError(`Groq timed out after ${AI_TIMEOUT_MS}ms`);
+    throw err;
+  }
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const message = data.error?.message || `HTTP ${res.status}`;
+    if (res.status === 429) {
+      if (/per day|\(TPD\)|\(RPD\)/i.test(message)) throw new AiUnavailableError(`Groq: daily free limit used up`);
+      throw new AiBusyError(`Groq is rate limited: ${message}`, Number(res.headers.get("retry-after")) || 20);
+    }
+    if (res.status >= 500) throw new AiBusyError(`Groq is overloaded: ${message}`, 15);
+    if ([401, 403, 404].includes(res.status) || /model/i.test(data.error?.code ?? "")) {
+      throw new AiUnavailableError(`Groq (${GROQ_MODEL}): ${message}`);
+    }
+    throw new Error(`Groq error: ${message}`);
+  }
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
+const AI_CLIENTS: Record<string, { key: string; ask: (prompt: string) => Promise<string> }> = {
+  gemini: { key: "GEMINI_API_KEY", ask: askGemini },
+  groq: { key: "GROQ_API_KEY", ask: askGroq },
+};
+
+/**
+ * Reads email batches with the configured AI services in order. A service that is out for the
+ * day (or misconfigured) is skipped for the rest of the request; a busy one hands over to the next.
+ */
+function createAiReader() {
+  const providers = AI_PROVIDERS.filter((p) => AI_CLIENTS[p] && Deno.env.get(AI_CLIENTS[p].key));
+  if (providers.length === 0) {
+    throw new FatalSyncError("No AI service is configured — set the GEMINI_API_KEY and/or GROQ_API_KEY secret.");
+  }
+  const unavailable = new Map<string, string>();
+  const usage: Record<string, number> = {};
+
+  return {
+    usage,
+    async read(emails: EmailForAI[]): Promise<Map<string, any>> {
+      const prompt = buildBatchPrompt(emails);
+      let busy: AiBusyError | null = null;
+      for (const provider of providers) {
+        if (unavailable.has(provider)) continue;
+        try {
+          const results = parseBatchResults(await AI_CLIENTS[provider].ask(prompt), emails);
+          usage[provider] = (usage[provider] ?? 0) + emails.length;
+          return results;
+        } catch (err) {
+          if (err instanceof AiUnavailableError) {
+            console.warn(`AI service unavailable — ${err.message}`);
+            unavailable.set(provider, err.message);
+            continue;
+          }
+          if (err instanceof AiBusyError) {
+            console.warn(`AI service busy — ${err.message}`);
+            busy ??= err;
+            continue;
+          }
+          throw err;
+        }
+      }
+      if (busy) throw busy;
+      throw new FatalSyncError(
+        `No AI service can read emails right now, so the sync stopped. Your synced orders are safe — try again later. (${[...unavailable.values()].join("; ")})`,
+      );
     },
+  };
+}
+
+/** Runs fn over items with at most `size` running at once. */
+async function runPool<T>(items: T[], size: number, fn: (item: T) => Promise<void>) {
+  const queue = [...items];
+  await Promise.all(
+    Array.from({ length: Math.min(size, queue.length) }, async () => {
+      for (let item = queue.shift(); item !== undefined; item = queue.shift()) await fn(item);
+    }),
   );
 }
 
@@ -246,10 +402,7 @@ Deno.serve(async (req) => {
     // Admin client — uses service role key to bypass RLS for DB writes
     const adminClient = createClient(supabaseUrl, supabaseServiceKey);
 
-    const geminiKey = Deno.env.get("GEMINI_API_KEY") || "";
-    if (!geminiKey) {
-      throw new Error("GEMINI_API_KEY secret is not set");
-    }
+    const ai = createAiReader();
 
     // 2. Resolve a Google access token: use the one from the client if it still works,
     //    otherwise mint a fresh one from the stored refresh token.
@@ -304,128 +457,208 @@ Deno.serve(async (req) => {
       .in("email_message_id", messages.map((m) => m.id));
     const alreadySynced = new Set((existing ?? []).map((r: any) => r.email_message_id));
 
+    // ...and emails an earlier sync already judged "not an order", so the AI never reads them twice
+    const { data: skippedBefore } = await adminClient
+      .from("skipped_emails")
+      .select("email_message_id")
+      .eq("user_id", user.id)
+      .in("email_message_id", messages.map((m) => m.id));
+    const previouslySkipped = new Set((skippedBefore ?? []).map((r: any) => r.email_message_id));
+
     const parsedOrders: any[] = [];
     const errors: string[] = [];
     let skipped = 0;
+    // Why emails were skipped — reported back so "0 found" is explainable
+    const skipReasons = { already_synced: 0, previously_skipped: 0, not_an_order: 0, no_text: 0 };
+    // Non-orders found in this request, remembered at the end
+    const toRemember: { email_message_id: string; reason: string; subject: string }[] = [];
+    const notOrderSubjects: string[] = [];
 
-    // 4. Process emails a few at a time; stop starting new ones near the function's time limit.
-    //    Emails not reached aren't saved, so the next sync picks them up again.
+    // 4. Download the new emails (a few at a time) and drop obvious non-orders without the AI.
+    //    Emails not reached before the time budget aren't saved, so the next sync picks them up.
     const deadline = requestStartedAt + TIME_BUDGET_MS;
     let deferred = 0;
-    const processMessage = async (message: { id: string }) => {
-      if (alreadySynced.has(message.id)) {
-        skipped++;
-        return;
-      }
+    // Once Gemini says "slow down", stop calling it for the rest of this request
+    let busyReason: string | null = null;
+    let retryAfterSec = 0;
 
+    type Candidate = EmailForAI & { id: string; bodyText: string };
+    const candidates: Candidate[] = [];
+
+    const pending = messages.filter((m) => {
+      if (alreadySynced.has(m.id)) {
+        skipped++;
+        skipReasons.already_synced++;
+        return false;
+      }
+      if (previouslySkipped.has(m.id)) {
+        skipped++;
+        skipReasons.previously_skipped++;
+        return false;
+      }
+      return true;
+    });
+
+    await runPool(pending, GMAIL_CONCURRENCY, async (message) => {
       if (Date.now() > deadline) {
         deferred++;
         return;
       }
-
-      const startedAt = Date.now();
       try {
         const emailData = await gmailGet(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${message.id}?format=full`,
           accessToken!,
         );
-
-        const bodyText = extractBodyText(emailData.payload);
-        if (!bodyText) {
-          skipped++;
-          return;
-        }
-
         const from = getHeader(emailData.payload, "From");
         const subject = getHeader(emailData.payload, "Subject");
-        const receivedAt = emailData.internalDate
+        // Fall back to Gmail's preview snippet when the body can't be decoded
+        const bodyText = extractBodyText(emailData.payload) || emailData.snippet || "";
+        if (!bodyText && !subject) {
+          skipped++;
+          skipReasons.no_text++;
+          toRemember.push({ email_message_id: message.id, reason: "no_text", subject });
+          console.log(`Skipped ${message.id} (no text)`);
+          return;
+        }
+        if (NOT_ORDER_SUBJECT.test(subject)) {
+          skipped++;
+          skipReasons.not_an_order++;
+          if (notOrderSubjects.length < 8) notOrderSubjects.push(subject);
+          toRemember.push({ email_message_id: message.id, reason: "filtered", subject });
+          console.log(`Filtered ${message.id} (not an order, no AI): ${subject}`);
+          return;
+        }
+        const date = emailData.internalDate
           ? new Date(Number(emailData.internalDate)).toISOString()
           : new Date().toISOString();
-
-        // 5. Parse with Gemini AI
-        const orderData = await parseWithGemini(
-          geminiKey,
-          `From: ${from}\nSubject: ${subject}\nDate: ${receivedAt}\n\nEmail content:\n${bodyText.substring(0, 6000)}`,
-        );
-
-        if (orderData.skip) {
-          skipped++;
-          return;
-        }
-
-        const platform = pick(orderData.platform, [...PLATFORMS, "Other"], "Other");
-        const senderName = from.replace(/<.*>/, "").replace(/"/g, "").trim();
-
-        // 6. Upsert into Supabase using admin client (bypasses RLS).
-        //    NOT NULL columns get safe fallbacks so a partial AI extraction doesn't drop the order.
-        const { data: savedOrder, error: saveError } = await adminClient
-          .from("orders")
-          .upsert(
-            {
-              user_id: user.id,
-              platform,
-              merchant: orderData.merchant || (platform !== "Other" ? platform : senderName) || "Unknown",
-              order_id: orderData.order_id || null,
-              status: pick(orderData.status, STATUSES, "ordered"),
-              total_amount: toNumber(orderData.total_amount),
-              currency: /^[A-Z]{3}$/.test(orderData.currency ?? "") ? orderData.currency : "INR",
-              category: pick(orderData.category, CATEGORIES, "shopping"),
-              tracking_number: orderData.tracking_number || null,
-              order_date: toIsoOrNull(orderData.order_date) || receivedAt,
-              expected_delivery: toIsoOrNull(orderData.expected_delivery),
-              payment_method: orderData.payment_method || null,
-              email_message_id: message.id,
-              raw_email_snippet: `${subject}\n${bodyText.substring(0, 500)}`,
-              updated_at: new Date().toISOString(),
-            },
-            { onConflict: "email_message_id" },
-          )
-          .select()
-          .single();
-
-        if (saveError) {
-          throw new Error(`DB save failed: ${saveError.message}`);
-        }
-
-        const products = Array.isArray(orderData.products) ? orderData.products.filter((p: any) => p?.name) : [];
-        await adminClient.from("order_products").delete().eq("order_id", savedOrder.id);
-        if (products.length > 0) {
-          const { error: productsError } = await adminClient.from("order_products").insert(
-            products.map((p: any) => ({
-              order_id: savedOrder.id,
-              name: String(p.name),
-              quantity: Math.max(1, Math.round(toNumber(p.quantity)) || 1),
-              price: toNumber(p.price),
-            })),
-          );
-          if (productsError) console.error("Products insert error:", message.id, productsError);
-        }
-
-        parsedOrders.push(orderData);
-        console.log(`Saved order from ${message.id} in ${Date.now() - startedAt}ms`);
+        candidates.push({
+          id: message.id,
+          key: `e${candidates.length + 1}`,
+          from,
+          subject,
+          date,
+          text: bodyText.substring(0, AI_TEXT_CHARS),
+          bodyText,
+        });
       } catch (err: any) {
-        if (err instanceof GmailAuthError || err instanceof FatalSyncError) throw err;
-        if (err instanceof GeminiBusyError) {
-          console.warn("Deferring email", message.id, err.message);
-          deferred++;
-          return;
-        }
-        console.error("Failed to process email", message.id, err);
+        if (err instanceof GmailAuthError) throw err;
+        console.error("Failed to fetch email", message.id, err);
         errors.push(`${message.id}: ${err.message}`);
       }
+    });
+
+    // 5. Read the remaining emails with the AI, several per request
+    const saveOrder = async (email: Candidate, orderData: any) => {
+      const platform = pick(orderData.platform, [...PLATFORMS, "Other"], "Other");
+      const senderName = email.from.replace(/<.*>/, "").replace(/"/g, "").trim();
+
+      // 6. Upsert into Supabase using admin client (bypasses RLS).
+      //    NOT NULL columns get safe fallbacks so a partial AI extraction doesn't drop the order.
+      const { data: savedOrder, error: saveError } = await adminClient
+        .from("orders")
+        .upsert(
+          {
+            user_id: user.id,
+            platform,
+            merchant: orderData.merchant || (platform !== "Other" ? platform : senderName) || "Unknown",
+            order_id: orderData.order_id || null,
+            status: pick(orderData.status, STATUSES, "ordered"),
+            total_amount: toNumber(orderData.total_amount),
+            currency: /^[A-Z]{3}$/.test(orderData.currency ?? "") ? orderData.currency : "INR",
+            category: pick(orderData.category, CATEGORIES, "shopping"),
+            tracking_number: orderData.tracking_number || null,
+            order_date: toIsoOrNull(orderData.order_date) || email.date,
+            expected_delivery: toIsoOrNull(orderData.expected_delivery),
+            payment_method: orderData.payment_method || null,
+            email_message_id: email.id,
+            raw_email_snippet: `${email.subject}\n${email.bodyText.substring(0, 500)}`,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "email_message_id" },
+        )
+        .select()
+        .single();
+
+      if (saveError) {
+        throw new Error(`DB save failed: ${saveError.message}`);
+      }
+
+      const products = Array.isArray(orderData.products) ? orderData.products.filter((p: any) => p?.name) : [];
+      await adminClient.from("order_products").delete().eq("order_id", savedOrder.id);
+      if (products.length > 0) {
+        const { error: productsError } = await adminClient.from("order_products").insert(
+          products.map((p: any) => ({
+            order_id: savedOrder.id,
+            name: String(p.name),
+            quantity: Math.max(1, Math.round(toNumber(p.quantity)) || 1),
+            price: toNumber(p.price),
+          })),
+        );
+        if (productsError) console.error("Products insert error:", email.id, productsError);
+      }
+      parsedOrders.push(orderData);
     };
 
-    const queue = [...messages];
-    await Promise.all(
-      Array.from({ length: CONCURRENCY }, async () => {
-        for (let message = queue.shift(); message; message = queue.shift()) {
-          await processMessage(message);
+    for (let i = 0; i < candidates.length; i += AI_BATCH_SIZE) {
+      const group = candidates.slice(i, i + AI_BATCH_SIZE);
+      if (busyReason || Date.now() > deadline) {
+        deferred += group.length;
+        continue;
+      }
+
+      let results: Map<string, any>;
+      try {
+        results = await ai.read(group);
+      } catch (err: any) {
+        if (err instanceof FatalSyncError) throw err;
+        if (err instanceof AiBusyError) {
+          console.warn(`Deferring ${group.length} emails:`, err.message);
+          deferred += group.length;
+          busyReason ??= err.message;
+          retryAfterSec = Math.max(retryAfterSec, err.retryAfterSec);
+          continue;
         }
-      }),
-    );
+        console.error("Gemini batch failed", err);
+        group.forEach((e) => errors.push(`${e.id}: ${err.message}`));
+        continue;
+      }
+
+      for (const email of group) {
+        const orderData = results.get(email.key);
+        if (!orderData) {
+          errors.push(`${email.id}: the AI returned no answer for this email`);
+          continue;
+        }
+        if (orderData.skip || orderData.is_order === false) {
+          skipped++;
+          skipReasons.not_an_order++;
+          if (notOrderSubjects.length < 8) notOrderSubjects.push(email.subject);
+          toRemember.push({ email_message_id: email.id, reason: "not_an_order", subject: email.subject });
+          console.log(`Skipped ${email.id} (not an order): ${email.subject}`);
+          continue;
+        }
+        try {
+          await saveOrder(email, orderData);
+          console.log(`Saved order from ${email.id}: ${email.subject}`);
+        } catch (err: any) {
+          console.error("Failed to save order", email.id, err);
+          errors.push(`${email.id}: ${err.message}`);
+        }
+      }
+    }
     console.log(
-      `Batch done in ${Date.now() - requestStartedAt}ms: ${parsedOrders.length} saved, ${skipped} skipped, ${errors.length} failed, ${deferred} deferred`,
+      `Batch done in ${Date.now() - requestStartedAt}ms: ${parsedOrders.length} saved, ${skipped} skipped, ${errors.length} failed, ${deferred} deferred, AI usage ${JSON.stringify(ai.usage)}`,
     );
+
+    if (toRemember.length > 0) {
+      const { error: rememberError } = await adminClient
+        .from("skipped_emails")
+        .upsert(
+          toRemember.map((r) => ({ ...r, user_id: user.id })),
+          { onConflict: "user_id,email_message_id" },
+        );
+      if (rememberError) console.error("Failed to remember skipped emails:", rememberError);
+    }
 
     await adminClient.from("gmail_sync_state").upsert({
       user_id: user.id,
@@ -438,7 +671,12 @@ Deno.serve(async (req) => {
         success: true,
         processed: messages.length,
         skipped,
+        skip_reasons: skipReasons,
+        not_order_subjects: notOrderSubjects,
         deferred,
+        deferred_reason: busyReason,
+        ai_usage: ai.usage,
+        retry_after: deferred > 0 ? retryAfterSec || 15 : 0,
         orders: parsedOrders,
         errors,
         nextPageToken,
