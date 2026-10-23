@@ -25,9 +25,13 @@ export const Route = createFileRoute("/dashboard")({
 
 const IN_TRANSIT: OrderStatus[] = ["ordered", "packed", "shipped", "out_for_delivery"];
 
+// Uses the viewer's local clock (this page only renders in the browser, never on the server)
 function greeting() {
   const h = new Date().getHours();
-  return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+  if (h < 5) return "Up late";
+  if (h < 12) return "Good morning";
+  if (h < 17) return "Good afternoon";
+  return "Good evening";
 }
 
 function Dashboard() {

@@ -7,6 +7,10 @@ import { nitro } from "nitro/vite";
 
 export default defineConfig({
   server: { host: "::", port: 8080 },
+  // Pre-bundle libraries that only lazily loaded pages use (recharts: Insights; zod: Search).
+  // Otherwise Vite discovers them mid-session, re-bundles, and the open page fails with
+  // "504 Outdated Optimize Dep" / "Failed to fetch dynamically imported module".
+  optimizeDeps: { include: ["recharts", "zod"] },
   resolve: {
     dedupe: [
       "react",
