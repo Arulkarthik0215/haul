@@ -9,26 +9,30 @@ import {
   Scripts,
 } from "@tanstack/react-router";
 import { useEffect, type ReactNode } from "react";
+import { Loader2 } from "lucide-react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppHeader } from "@/components/app-header";
 import { MobileNav } from "@/components/mobile-nav";
+import { SyncProvider } from "@/components/sync-provider";
+import { themeBootScript } from "@/hooks/use-theme";
+import { useAuthSession } from "@/hooks/use-auth";
 
 function NotFoundComponent() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">
-        <h1 className="text-7xl font-bold text-foreground">404</h1>
-        <h2 className="mt-4 text-xl font-semibold text-foreground">Page not found</h2>
+        <p className="text-sm font-semibold tracking-[0.3em] text-muted-foreground">404</p>
+        <h1 className="mt-3 text-3xl font-semibold text-foreground">Page not found</h1>
         <p className="mt-2 text-sm text-muted-foreground">
           The page you're looking for doesn't exist or has been moved.
         </p>
         <div className="mt-6">
           <Link
             to="/"
-            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            className="inline-flex h-11 items-center justify-center rounded-md bg-primary px-5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-foreground hover:text-background"
           >
             Go home
           </Link>
@@ -60,13 +64,13 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
               router.invalidate();
               reset();
             }}
-            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            className="inline-flex h-11 items-center justify-center rounded-md bg-primary px-5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-foreground hover:text-background"
           >
             Try again
           </button>
           <a
             href="/"
-            className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+            className="inline-flex h-11 items-center justify-center rounded-md bg-surface-2 px-5 text-sm font-semibold text-foreground transition-colors hover:bg-foreground hover:text-background"
           >
             Go home
           </a>
@@ -85,24 +89,30 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       {
         name: "description",
         content:
-          "OrderHub turns your inbox into a beautiful commerce timeline. Track every order from Amazon, Swiggy, Myntra and more in one unified dashboard.",
+          "OrderHub reads your order emails and keeps every purchase — Amazon, Flipkart, Swiggy, Myntra and more — in one tidy, private list.",
       },
       { property: "og:title", content: "OrderHub — All your orders in one place" },
       {
         property: "og:description",
-        content:
-          "A unified dashboard for every online purchase — powered by your inbox.",
+        content: "A unified dashboard for every online purchase — powered by your inbox.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
     links: [
+      { rel: "preconnect", href: "https://fonts.googleapis.com" },
+      { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
+      {
+        rel: "stylesheet",
+        href: "https://fonts.googleapis.com/css2?family=Geist:wght@400..700&family=Geist+Mono:wght@400..600&display=swap",
+      },
       { rel: "stylesheet", href: appCss },
-      { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      // No favicon: an empty icon stops the browser requesting /favicon.ico
+      { rel: "icon", href: "data:," },
     ],
     scripts: [
       {
-        children: `try{var t=localStorage.getItem('orderhub-theme')||'dark';if(t==='dark')document.documentElement.classList.add('dark');}catch(e){document.documentElement.classList.add('dark');}`,
+        children: themeBootScript,
       },
     ],
   }),
@@ -114,7 +124,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 
 function RootShell({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>
@@ -128,21 +138,52 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function AppShell() {
   const pathname = useRouterState({ select: (r) => r.location.pathname });
-  const isLogin = pathname === "/login";
+  const router = useRouter();
+  const { data: session, isLoading } = useAuthSession();
+  // The landing page is public; everything else is the signed-in app
+  const isPublic = pathname === "/" || pathname === "/login";
 
-  if (isLogin) return <Outlet />;
+  useEffect(() => {
+    if (!isPublic && !isLoading && !session) {
+      // Drop any stale saved session first, or the landing page would send us straight back here
+      try {
+        Object.keys(localStorage)
+          .filter((k) => /^sb-.+-auth-token$/.test(k))
+          .forEach((k) => localStorage.removeItem(k));
+      } catch {
+        // storage unavailable — nothing to clear
+      }
+      router.navigate({ to: "/", replace: true });
+    }
+  }, [isPublic, isLoading, session, router]);
+
+  if (isPublic) return <Outlet />;
+
+  if (isLoading || !session) {
+    return (
+      <div
+        className="flex min-h-screen items-center justify-center bg-background"
+        role="status"
+        aria-label="Loading"
+      >
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
-    <div className="flex min-h-screen w-full bg-background text-foreground">
-      <AppSidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <AppHeader />
-        <main className="flex-1 pb-20 md:pb-8">
-          <Outlet />
-        </main>
+    <SyncProvider>
+      <div className="flex min-h-screen w-full bg-background text-foreground">
+        <AppSidebar />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <AppHeader />
+          <main className="flex-1 pb-24 md:pb-12">
+            <Outlet />
+          </main>
+        </div>
+        <MobileNav />
       </div>
-      <MobileNav />
-    </div>
+    </SyncProvider>
   );
 }
 

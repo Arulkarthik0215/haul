@@ -1,15 +1,15 @@
 import { cn } from "@/lib/utils";
 import type { OrderStatus } from "@/types/order";
-import { statusLabel } from "@/lib/mock-data";
+import { statusLabel } from "@/lib/platforms";
 
 const styles: Record<OrderStatus, string> = {
-  ordered: "bg-status-ordered/10 text-status-ordered ring-status-ordered/20",
-  packed: "bg-status-packed/10 text-status-packed ring-status-packed/20",
-  shipped: "bg-status-shipped/10 text-status-shipped ring-status-shipped/20",
-  out_for_delivery: "bg-status-ofd/10 text-status-ofd ring-status-ofd/20",
-  delivered: "bg-status-delivered/10 text-status-delivered ring-status-delivered/25",
-  cancelled: "bg-status-cancelled/10 text-status-cancelled ring-status-cancelled/25",
-  refunded: "bg-status-refunded/15 text-status-refunded ring-status-refunded/25",
+  ordered: "bg-status-ordered/12 text-status-ordered",
+  packed: "bg-status-packed/12 text-status-packed",
+  shipped: "bg-status-shipped/14 text-status-shipped",
+  out_for_delivery: "bg-status-ofd/14 text-status-ofd",
+  delivered: "bg-status-delivered/12 text-status-delivered",
+  cancelled: "bg-status-cancelled/12 text-status-cancelled",
+  refunded: "bg-status-refunded/14 text-status-refunded",
 };
 
 interface Props {
@@ -22,15 +22,13 @@ export function StatusBadge({ status, className, withDot = true }: Props) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset",
-        styles[status],
+        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium",
+        styles[status] ?? styles.ordered,
         className,
       )}
     >
-      {withDot && (
-        <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: "currentColor" }} />
-      )}
-      {statusLabel(status)}
+      {withDot && <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />}
+      {statusLabel(status) ?? status}
     </span>
   );
 }

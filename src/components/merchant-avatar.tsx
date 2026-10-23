@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { getPlatformMeta } from "@/lib/mock-data";
+import { getPlatformMeta } from "@/lib/platforms";
 import type { Platform } from "@/types/order";
 
 interface Props {
@@ -9,9 +9,9 @@ interface Props {
 }
 
 const sizes = {
-  sm: "h-8 w-8 text-xs",
-  md: "h-10 w-10 text-sm",
-  lg: "h-14 w-14 text-lg",
+  sm: "h-8 w-8 text-xs rounded-md",
+  md: "h-10 w-10 text-sm rounded-md",
+  lg: "h-14 w-14 text-xl rounded-lg",
 };
 
 export function MerchantAvatar({ platform, size = "md", className }: Props) {
@@ -19,7 +19,7 @@ export function MerchantAvatar({ platform, size = "md", className }: Props) {
   return (
     <div
       className={cn(
-        "flex items-center justify-center rounded-xl font-semibold text-white shrink-0 ring-1 ring-inset ring-white/10",
+        "flex shrink-0 items-center justify-center font-semibold text-white",
         sizes[size],
         className,
       )}

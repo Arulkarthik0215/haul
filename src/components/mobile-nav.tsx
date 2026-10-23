@@ -1,33 +1,29 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutDashboard, Package, BarChart3, Search, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-const nav = [
-  { url: "/", icon: LayoutDashboard, label: "Home" },
-  { url: "/orders", icon: Package, label: "Orders" },
-  { url: "/analytics", icon: BarChart3, label: "Stats" },
-  { url: "/search", icon: Search, label: "Search" },
-  { url: "/settings", icon: Settings, label: "Settings" },
-] as const;
+import { isActive, navItems } from "./app-sidebar";
 
 export function MobileNav() {
   const pathname = useRouterState({ select: (r) => r.location.pathname });
   return (
-    <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 border-t bg-background/95 backdrop-blur">
+    <nav
+      aria-label="Main"
+      className="fixed inset-x-0 bottom-0 z-30 bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden"
+    >
       <div className="grid grid-cols-5">
-        {nav.map((item) => {
-          const active = item.url === "/" ? pathname === "/" : pathname.startsWith(item.url);
+        {navItems.map((item) => {
+          const active = isActive(pathname, item.url);
           return (
             <Link
               key={item.url}
               to={item.url}
+              aria-current={active ? "page" : undefined}
               className={cn(
-                "flex flex-col items-center gap-1 py-2.5 text-[10px]",
+                "flex flex-col items-center gap-1 py-2.5 text-[11px] font-medium",
                 active ? "text-foreground" : "text-muted-foreground",
               )}
             >
-              <item.icon className="h-5 w-5" />
-              {item.label}
+              <item.icon className={cn("h-5 w-5", active && "text-primary")} />
+              {item.title}
             </Link>
           );
         })}

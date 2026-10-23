@@ -2,8 +2,7 @@ import { supabase } from "@/lib/supabase";
 
 export async function signInWithGoogle() {
   if (!supabase) {
-    console.warn("Supabase is not configured. Falling back to mock login.");
-    return { data: { provider: "google", url: "/" }, error: null };
+    return { data: null, error: new Error("Sign-in isn't configured (missing Supabase keys).") };
   }
 
   const { data, error } = await supabase.auth.signInWithOAuth({

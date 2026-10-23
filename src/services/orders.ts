@@ -1,5 +1,4 @@
 import { supabase } from "@/lib/supabase";
-import { mockOrders } from "@/lib/mock-data";
 import type { Order, Product, TimelineEvent } from "@/types/order";
 
 // The DB uses snake_case columns; the UI works with the camelCase Order interface.
@@ -45,18 +44,17 @@ function mapOrderRow(row: any): Order {
 }
 
 export async function fetchOrders(): Promise<Order[]> {
-  if (!supabase) {
-    // Fallback to mock data if no Supabase config
-    return mockOrders;
-  }
+  if (!supabase) return [];
 
   const { data, error } = await supabase
     .from("orders")
-    .select(`
+    .select(
+      `
       *,
       products:order_products(*),
       timeline:order_timeline(*)
-    `)
+    `,
+    )
     .order("order_date", { ascending: false });
 
   if (error) {
@@ -68,22 +66,22 @@ export async function fetchOrders(): Promise<Order[]> {
 }
 
 export async function fetchOrderById(id: string): Promise<Order | null> {
-  if (!supabase) {
-    return mockOrders.find((o) => o.id === id) || null;
-  }
+  if (!supabase) return null;
 
   const { data, error } = await supabase
     .from("orders")
-    .select(`
+    .select(
+      `
       *,
       products:order_products(*),
       timeline:order_timeline(*)
-    `)
+    `,
+    )
     .eq("id", id)
     .single();
 
   if (error) {
-    if (error.code === 'PGRST116') return null; // not found
+    if (error.code === "PGRST116") return null; // not found
     console.error("Error fetching order by ID:", error);
     throw error;
   }

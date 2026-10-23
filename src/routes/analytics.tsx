@@ -1,201 +1,273 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo } from "react";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  LineChart,
-  Line,
-  CartesianGrid,
-} from "recharts";
+import { useMemo, type ReactNode } from "react";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { ChartColumn } from "lucide-react";
 import { useOrders } from "@/hooks/use-orders";
-import { getPlatformMeta } from "@/lib/mock-data";
 import { formatCurrency } from "@/lib/format";
-import { StatCard } from "@/components/stat-card";
-import { TrendingUp, ShoppingCart, Repeat, PieChart as PieIcon, Loader2 } from "lucide-react";
+import { StatCard, StatGrid } from "@/components/stat-card";
+import { EmptyState } from "@/components/empty-state";
+import { PageContainer, PageHeader, PageLoading } from "@/components/page-header";
+import { SyncButton } from "@/components/sync-provider";
+import type { Category } from "@/types/order";
 
 export const Route = createFileRoute("/analytics")({
-  head: () => ({ meta: [{ title: "Analytics · OrderHub" }] }),
-  component: Analytics,
+  head: () => ({ meta: [{ title: "Insights · OrderHub" }] }),
+  component: Insights,
 });
 
-const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const monthNames = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
 
-function Analytics() {
+// Colour follows the category, never its rank (fixed categorical slots)
+const CATEGORY_SLOTS: Record<Category, string> = {
+  shopping: "var(--chart-1)",
+  food: "var(--chart-2)",
+  grocery: "var(--chart-3)",
+  entertainment: "var(--chart-4)",
+  travel: "var(--chart-5)",
+};
+
+function compactRupees(v: number) {
+  if (v >= 100000) return `₹${(v / 100000).toFixed(1)}L`;
+  if (v >= 1000) return `₹${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`;
+  return `₹${v}`;
+}
+
+function Insights() {
   const { data: orders = [], isLoading } = useOrders();
-  const valid = orders.filter((o) => o.status !== "cancelled" && o.status !== "refunded");
+  const valid = useMemo(
+    () => orders.filter((o) => o.status !== "cancelled" && o.status !== "refunded"),
+    [orders],
+  );
 
   const monthly = useMemo(() => {
-    const map = new Map<string, number>();
+    const rows: { key: string; month: string; spent: number; orders: number }[] = [];
     for (let i = 5; i >= 0; i--) {
       const d = new Date();
+      d.setDate(1);
       d.setMonth(d.getMonth() - i);
-      map.set(`${d.getFullYear()}-${d.getMonth()}`, 0);
+      rows.push({
+        key: `${d.getFullYear()}-${d.getMonth()}`,
+        month: monthNames[d.getMonth()],
+        spent: 0,
+        orders: 0,
+      });
     }
     valid.forEach((o) => {
       const d = new Date(o.orderDate);
-      const key = `${d.getFullYear()}-${d.getMonth()}`;
-      if (map.has(key)) map.set(key, (map.get(key) || 0) + o.totalAmount);
+      const row = rows.find((r) => r.key === `${d.getFullYear()}-${d.getMonth()}`);
+      if (row) {
+        row.spent += o.totalAmount;
+        row.orders += 1;
+      }
     });
-    return Array.from(map.entries()).map(([k, v]) => {
-      const [, m] = k.split("-");
-      return { month: monthNames[Number(m)], spent: v };
-    });
-  }, [valid]);
-
-  const byPlatform = useMemo(() => {
-    const map = new Map<string, number>();
-    valid.forEach((o) => map.set(o.platform, (map.get(o.platform) || 0) + 1));
-    return Array.from(map.entries())
-      .map(([platform, count]) => ({ platform, count, color: getPlatformMeta(platform as any).color }))
-      .sort((a, b) => b.count - a.count);
+    return rows;
   }, [valid]);
 
   const byCategory = useMemo(() => {
-    const map = new Map<string, number>();
-    valid.forEach((o) => map.set(o.category, (map.get(o.category) || 0) + o.totalAmount));
-    const colors = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)"];
-    return Array.from(map.entries()).map(([name, value], i) => ({
-      name,
-      value,
-      color: colors[i % colors.length],
-    }));
+    const total = valid.reduce((s, o) => s + o.totalAmount, 0) || 1;
+    return (Object.keys(CATEGORY_SLOTS) as Category[])
+      .map((c) => {
+        const spent = valid.filter((o) => o.category === c).reduce((s, o) => s + o.totalAmount, 0);
+        return { category: c, spent, share: spent / total, color: CATEGORY_SLOTS[c] };
+      })
+      .filter((c) => c.spent > 0);
   }, [valid]);
 
-  const topMerchants = useMemo(() => {
-    const map = new Map<string, number>();
-    valid.forEach((o) => map.set(o.merchant, (map.get(o.merchant) || 0) + o.totalAmount));
+  const byShop = useMemo(() => {
+    const map = new Map<string, { spent: number; orders: number }>();
+    valid.forEach((o) => {
+      const cur = map.get(o.platform) ?? { spent: 0, orders: 0 };
+      map.set(o.platform, { spent: cur.spent + o.totalAmount, orders: cur.orders + 1 });
+    });
     return Array.from(map.entries())
-      .map(([merchant, spent]) => ({ merchant, spent }))
+      .map(([shop, v]) => ({ shop, ...v }))
       .sort((a, b) => b.spent - a.spent)
-      .slice(0, 6);
+      .slice(0, 8);
   }, [valid]);
 
-  const avgOrder = valid.reduce((s, o) => s + o.totalAmount, 0) / (valid.length || 1);
-  const totalSpent = valid.reduce((s, o) => s + o.totalAmount, 0);
+  if (isLoading) return <PageLoading />;
 
-  if (isLoading) {
-    return (
-      <div className="flex h-[50vh] items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
+  const totalSpent = valid.reduce((s, o) => s + o.totalAmount, 0);
+  const sixMonthSpend = monthly.reduce((s, m) => s + m.spent, 0);
+  const avgOrder = totalSpent / (valid.length || 1);
+  const topShop = byShop[0];
+  const maxShop = topShop?.spent || 1;
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 md:px-8">
-      <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Spending patterns across every platform.
-      </p>
+    <PageContainer>
+      <PageHeader title="Insights" description="Where your money goes, across every shop." />
 
-      <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Total Spent" value={formatCurrency(totalSpent)} hint="last 6 months" icon={TrendingUp} />
-        <StatCard label="Total Orders" value={String(valid.length)} icon={ShoppingCart} />
-        <StatCard label="Avg Order Value" value={formatCurrency(avgOrder)} icon={PieIcon} />
-        <StatCard label="Order Frequency" value={`${(valid.length / 4).toFixed(1)}/wk`} hint="last month" icon={Repeat} />
-      </div>
+      {valid.length === 0 ? (
+        <EmptyState
+          icon={ChartColumn}
+          title="Nothing to chart yet"
+          description="Once you've synced your inbox, your spending by month, category and shop shows up here."
+          action={<SyncButton />}
+        />
+      ) : (
+        <>
+          <StatGrid>
+            <StatCard label="Spent, last 6 months" value={formatCurrency(sixMonthSpend)} />
+            <StatCard
+              label="Orders"
+              value={String(valid.length)}
+              hint="excluding cancelled & refunded"
+            />
+            <StatCard label="Average order" value={formatCurrency(avgOrder)} />
+            <StatCard
+              label="Top shop"
+              value={topShop?.shop ?? "—"}
+              hint={
+                topShop
+                  ? `${formatCurrency(topShop.spent)} across ${topShop.orders} orders`
+                  : undefined
+              }
+            />
+          </StatGrid>
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <Card title="Monthly spending">
-          <ResponsiveContainer width="100%" height={240}>
-            <BarChart data={monthly}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-              <XAxis dataKey="month" stroke="var(--muted-foreground)" fontSize={12} tickLine={false} axisLine={false} />
-              <YAxis stroke="var(--muted-foreground)" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}k`} />
-              <Tooltip
-                cursor={{ fill: "var(--muted)" }}
-                contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
-                formatter={(v: number) => formatCurrency(v)}
-              />
-              <Bar dataKey="spent" fill="var(--chart-1)" radius={[6, 6, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
-
-        <Card title="Orders by platform">
-          <ResponsiveContainer width="100%" height={240}>
-            <BarChart data={byPlatform} layout="vertical" margin={{ left: 20 }}>
-              <XAxis type="number" hide />
-              <YAxis dataKey="platform" type="category" stroke="var(--muted-foreground)" fontSize={12} tickLine={false} axisLine={false} width={80} />
-              <Tooltip
-                cursor={{ fill: "var(--muted)" }}
-                contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
-              />
-              <Bar dataKey="count" radius={[0, 6, 6, 0]}>
-                {byPlatform.map((d, i) => (
-                  <Cell key={i} fill={d.color} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
-
-        <Card title="Spending by category">
-          <ResponsiveContainer width="100%" height={240}>
-            <PieChart>
-              <Pie data={byCategory} dataKey="value" nameKey="name" innerRadius={55} outerRadius={90} paddingAngle={2}>
-                {byCategory.map((d, i) => (
-                  <Cell key={i} fill={d.color} />
-                ))}
-              </Pie>
-              <Tooltip
-                contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
-                formatter={(v: number) => formatCurrency(v)}
-              />
-            </PieChart>
-          </ResponsiveContainer>
-          <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
-            {byCategory.map((c) => (
-              <div key={c.name} className="flex items-center gap-1.5 capitalize">
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: c.color }} />
-                {c.name}
+          <div className="mt-4 grid gap-1 overflow-hidden rounded-lg lg:grid-cols-[3fr_2fr]">
+            <Panel title="Monthly spending" subtitle="Last 6 months">
+              <div
+                className="h-64"
+                role="img"
+                aria-label="Bar chart of spending per month for the last six months"
+              >
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={monthly} margin={{ top: 8, right: 4, left: -8, bottom: 0 }}>
+                    <CartesianGrid stroke="var(--border)" vertical={false} />
+                    <XAxis
+                      dataKey="month"
+                      stroke="var(--muted-foreground)"
+                      fontSize={12}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <YAxis
+                      stroke="var(--muted-foreground)"
+                      fontSize={12}
+                      tickLine={false}
+                      axisLine={false}
+                      width={48}
+                      tickFormatter={compactRupees}
+                    />
+                    <Tooltip cursor={{ fill: "var(--surface-2)" }} content={<MonthTooltip />} />
+                    <Bar
+                      dataKey="spent"
+                      fill="var(--primary)"
+                      radius={[4, 4, 0, 0]}
+                      maxBarSize={36}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
-            ))}
+            </Panel>
+
+            <Panel title="By category" subtitle="Share of all spending">
+              <div className="flex h-3 w-full gap-[2px] overflow-hidden rounded-full" aria-hidden>
+                {byCategory.map((c) => (
+                  <span
+                    key={c.category}
+                    style={{ width: `${c.share * 100}%`, background: c.color }}
+                  />
+                ))}
+              </div>
+              <ul className="mt-5 space-y-3">
+                {byCategory.map((c) => (
+                  <li key={c.category} className="flex items-center gap-3 text-sm">
+                    <span
+                      className="h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{ background: c.color }}
+                      aria-hidden
+                    />
+                    <span className="flex-1 capitalize">{c.category}</span>
+                    <span className="tabular-nums text-muted-foreground">
+                      {Math.round(c.share * 100)}%
+                    </span>
+                    <span className="w-24 text-right font-medium tabular-nums">
+                      {formatCurrency(c.spent)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </Panel>
           </div>
-        </Card>
 
-        <Card title="Order frequency">
-          <ResponsiveContainer width="100%" height={240}>
-            <LineChart data={monthly}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-              <XAxis dataKey="month" stroke="var(--muted-foreground)" fontSize={12} tickLine={false} axisLine={false} />
-              <YAxis stroke="var(--muted-foreground)" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}k`} />
-              <Tooltip
-                contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
-                formatter={(v: number) => formatCurrency(v)}
-              />
-              <Line type="monotone" dataKey="spent" stroke="var(--chart-2)" strokeWidth={2} dot={{ r: 3 }} />
-            </LineChart>
-          </ResponsiveContainer>
-        </Card>
-      </div>
-
-      <Card title="Top merchants" className="mt-4">
-        <ul className="divide-y">
-          {topMerchants.map((m) => (
-            <li key={m.merchant} className="flex items-center justify-between py-3 first:pt-0 last:pb-0">
-              <span className="text-sm font-medium">{m.merchant}</span>
-              <span className="text-sm font-semibold tabular-nums">{formatCurrency(m.spent)}</span>
-            </li>
-          ))}
-        </ul>
-      </Card>
-    </div>
+          <div className="mt-4 overflow-hidden rounded-lg">
+            <Panel title="Where you shop" subtitle="Total spent per shop">
+              <ul className="space-y-4">
+                {byShop.map((s) => (
+                  <li
+                    key={s.shop}
+                    className="grid grid-cols-[7rem_1fr_6.5rem] items-center gap-4 text-sm sm:grid-cols-[9rem_1fr_8rem]"
+                  >
+                    <span className="truncate font-medium">{s.shop}</span>
+                    <span className="h-2 overflow-hidden rounded-full bg-surface-2">
+                      <span
+                        className="block h-full rounded-full bg-primary"
+                        style={{ width: `${Math.max(2, (s.spent / maxShop) * 100)}%` }}
+                      />
+                    </span>
+                    <span className="text-right tabular-nums">
+                      <span className="font-medium">{formatCurrency(s.spent)}</span>
+                      <span className="ml-1.5 text-muted-foreground">· {s.orders}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </Panel>
+          </div>
+        </>
+      )}
+    </PageContainer>
   );
 }
 
-function Card({ title, children, className }: { title: string; children: React.ReactNode; className?: string }) {
+function Panel({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  children: ReactNode;
+}) {
   return (
-    <div className={`rounded-2xl border bg-card p-5 ${className ?? ""}`}>
-      <h3 className="mb-4 text-sm font-semibold">{title}</h3>
-      {children}
+    <section className="bg-card p-6">
+      <h2 className="text-base font-semibold">{title}</h2>
+      {subtitle && <p className="mt-0.5 text-[13px] text-muted-foreground">{subtitle}</p>}
+      <div className="mt-6">{children}</div>
+    </section>
+  );
+}
+
+function MonthTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: { payload: { month: string; spent: number; orders: number } }[];
+}) {
+  if (!active || !payload?.length) return null;
+  const row = payload[0].payload;
+  return (
+    <div className="rounded-md bg-popover px-3 py-2 text-sm shadow-[var(--shadow-soft)]">
+      <div className="font-medium">{row.month}</div>
+      <div className="tabular-nums text-muted-foreground">
+        {formatCurrency(row.spent)} · {row.orders} order{row.orders === 1 ? "" : "s"}
+      </div>
     </div>
   );
 }

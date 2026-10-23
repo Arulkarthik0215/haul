@@ -1,275 +1,126 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Mail, Bell, RefreshCw, Shield, LogOut, Moon, Sun } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
+import { ExternalLink, LogOut, Moon, Sun } from "lucide-react";
+import type { ReactNode } from "react";
 import { useTheme } from "@/hooks/use-theme";
-import { useSignOut, useAuthSession } from "@/hooks/use-auth";
-import { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { supabase, getProviderToken } from "@/lib/supabase";
+import { useSignOut } from "@/hooks/use-auth";
+import { PageContainer, PageHeader } from "@/components/page-header";
+import { LastSynced, SyncButton, useSyncState } from "@/components/sync-provider";
+import { UserChip } from "@/components/user-chip";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/settings")({
   head: () => ({ meta: [{ title: "Settings · OrderHub" }] }),
   component: SettingsPage,
 });
 
-interface SyncResponse {
-  success?: boolean;
-  processed?: number;
-  orders?: unknown[];
-  errors?: string[];
-  deferred?: number;
-  nextPageToken?: string;
-  error?: string;
-  message?: string;
-  reauth?: boolean;
-}
-
 function SettingsPage() {
   const { theme, setTheme } = useTheme();
-  const [notifications, setNotifications] = useState(true);
-  const [autoSync, setAutoSync] = useState(true);
-  const [syncing, setSyncing] = useState(false);
-  const [syncResult, setSyncResult] = useState<string | null>(null);
-  const queryClient = useQueryClient();
-  
   const navigate = useNavigate();
-  const { mutate: signOut } = useSignOut();
-  const { data: session } = useAuthSession();
+  const { mutate: signOut, isPending: signingOut } = useSignOut();
+  const { data: syncState } = useSyncState();
 
   const handleSignOut = () => {
-    signOut(undefined, {
-      onSuccess: () => navigate({ to: "/login" })
-    });
-  };
-
-  const handleSync = async () => {
-    if (!supabase) return;
-    setSyncing(true);
-    setSyncResult(null);
-    try {
-      // Optional fast path — the edge function falls back to the stored Google refresh token
-      const providerToken = getProviderToken();
-
-      // Force a session refresh to get a valid access token
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      
-      if (sessionError || !session) {
-        setSyncResult(`Session error: ${sessionError?.message || 'No active session. Please log in again.'}`);
-        return;
-      }
-
-      let nextPageToken: string | undefined = undefined;
-      let totalProcessed = 0;
-      let totalOrders = 0;
-      let totalErrors = 0;
-      let totalDeferred = 0;
-      let firstError: string | undefined;
-      let pagesFetched = 0;
-      let failed = false;
-      const PAGE_SIZE = 4; // Small batches keep each edge function call within its CPU/time limits
-      const MAX_PAGES = 25; // Safety limit: process up to ~100 emails per sync click
-
-      do {
-        setSyncResult(`Syncing... Processed ${totalProcessed} emails so far.`);
-        
-        const res: Response = await fetch(
-          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-gmail`,
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${session.access_token}`,
-              'Content-Type': 'application/json',
-              'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
-            },
-            body: JSON.stringify({ 
-              provider_token: providerToken,
-              page_token: nextPageToken,
-              page_size: PAGE_SIZE,
-            }),
-          }
-        );
-
-        const result: SyncResponse = await res.json();
-
-        if (!res.ok || result.error) {
-          setSyncResult(
-            result.reauth
-              ? `${result.error} Please sign out and sign in again to re-authorize Gmail.`
-              : `Sync error: ${result.error || result.message || res.statusText}`,
-          );
-          failed = true;
-          break; // Stop on error
-        }
-
-        totalProcessed += result.processed || 0;
-        totalOrders += result.orders?.length || 0;
-        totalErrors += result.errors?.length || 0;
-        totalDeferred += result.deferred || 0;
-        firstError ??= result.errors?.[0];
-        nextPageToken = result.nextPageToken;
-        pagesFetched++;
-
-        // Update UI immediately with findings
-        queryClient.invalidateQueries({ queryKey: ["orders"] });
-
-      } while (nextPageToken && pagesFetched < MAX_PAGES);
-
-      const errorNote = totalErrors
-        ? ` ${totalErrors} email(s) failed to parse (e.g. ${firstError}).`
-        : "";
-      const deferredNote = totalDeferred
-        ? ` ${totalDeferred} email(s) postponed (Gemini busy) — click Sync again later to pick them up.`
-        : "";
-
-      if (failed) {
-        // keep the error message
-      } else if (pagesFetched >= MAX_PAGES && nextPageToken) {
-        setSyncResult(`Synced! Processed ${totalProcessed} emails, found ${totalOrders} orders.${errorNote}${deferredNote} Click Sync again to fetch more older history.`);
-      } else {
-        setSyncResult(`Sync complete! Processed ${totalProcessed} emails, found ${totalOrders} orders.${errorNote}${deferredNote}`);
-      }
-
-    } catch (e: any) {
-      console.error(e);
-      setSyncResult(`Sync failed: ${e.message}`);
-    } finally {
-      setSyncing(false);
-    }
+    signOut(undefined, { onSuccess: () => navigate({ to: "/" }) });
   };
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-8 md:px-8">
-      <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-      <p className="mt-1 text-sm text-muted-foreground">Manage your account and preferences.</p>
+    <PageContainer narrow>
+      <PageHeader title="Settings" description="Your account, inbox connection and preferences." />
 
-      <Section title="Account">
-        <Row icon={Mail} label="Connected Gmail" value={session?.user?.email || "Demo User"} />
-      </Section>
-
-      <Section title="Appearance">
-        <div className="rounded-xl border bg-card p-4">
-          <div className="text-sm font-medium">Theme</div>
-          <div className="mt-3 grid grid-cols-2 gap-2">
+      <div className="space-y-4">
+        <Section title="Account">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <UserChip />
             <button
-              onClick={() => setTheme("dark")}
-              className={`flex items-center justify-center gap-2 rounded-lg border py-2 text-sm ${
-                theme === "dark" ? "border-foreground bg-accent" : "hover:border-foreground/30"
-              }`}
+              onClick={handleSignOut}
+              disabled={signingOut}
+              className="inline-flex h-10 items-center gap-2 rounded-md bg-surface-2 px-4 text-sm font-semibold transition-colors hover:bg-bad hover:text-white disabled:opacity-50"
             >
-              <Moon className="h-4 w-4" /> Dark
-            </button>
-            <button
-              onClick={() => setTheme("light")}
-              className={`flex items-center justify-center gap-2 rounded-lg border py-2 text-sm ${
-                theme === "light" ? "border-foreground bg-accent" : "hover:border-foreground/30"
-              }`}
-            >
-              <Sun className="h-4 w-4" /> Light
+              <LogOut className="h-4 w-4" /> {signingOut ? "Signing out…" : "Sign out"}
             </button>
           </div>
-        </div>
-      </Section>
+        </Section>
 
-      <Section title="Preferences">
-        <ToggleRow
-          icon={Bell}
-          label="Notifications"
-          description="Get notified for shipment and delivery updates"
-          checked={notifications}
-          onChange={setNotifications}
-        />
-        <ToggleRow
-          icon={RefreshCw}
-          label="Automatic sync"
-          description="Sync new emails every 15 minutes"
-          checked={autoSync}
-          onChange={setAutoSync}
-        />
-        <div className="mt-4 flex justify-end">
-          <button 
-            onClick={handleSync}
-            disabled={syncing}
-            className="inline-flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background hover:bg-foreground/90 disabled:opacity-50"
+        <Section
+          title="Gmail sync"
+          description="OrderHub reads order, shipping and receipt emails — read-only. It never sends, deletes or changes mail."
+        >
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <LastSynced className="block text-[15px] font-medium" />
+              {syncState?.total_emails_processed ? (
+                <span className="text-sm text-muted-foreground">
+                  {syncState.total_emails_processed.toLocaleString("en-IN")} emails checked so far
+                </span>
+              ) : null}
+            </div>
+            <SyncButton />
+          </div>
+        </Section>
+
+        <Section title="Appearance">
+          <div className="grid grid-cols-2 gap-1" role="radiogroup" aria-label="Theme">
+            {(
+              [
+                { value: "light", label: "Light", icon: Sun },
+                { value: "dark", label: "Dark", icon: Moon },
+              ] as const
+            ).map((t) => (
+              <button
+                key={t.value}
+                role="radio"
+                aria-checked={theme === t.value}
+                onClick={() => setTheme(t.value)}
+                className={cn(
+                  "relative flex h-12 items-center justify-center gap-2 overflow-hidden rounded-md text-sm font-semibold transition-colors",
+                  theme === t.value
+                    ? "bg-surface-2 text-foreground"
+                    : "bg-background text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <t.icon className="h-4 w-4" /> {t.label}
+                {theme === t.value && (
+                  <span className="absolute inset-x-0 bottom-0 h-[3px] bg-primary" aria-hidden />
+                )}
+              </button>
+            ))}
+          </div>
+        </Section>
+
+        <Section title="Privacy">
+          <ul className="space-y-2 text-sm text-muted-foreground">
+            <li>Only the order details are stored — never your full emails.</li>
+            <li>Your orders are visible only to you, enforced by the database itself.</li>
+            <li>Nothing is shared or sold.</li>
+          </ul>
+          <a
+            href="https://myaccount.google.com/permissions"
+            target="_blank"
+            rel="noreferrer"
+            className="mt-4 inline-flex items-center gap-1.5 text-sm font-semibold text-primary hover:underline"
           >
-            <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
-            {syncing ? 'Syncing...' : 'Sync Now'}
-          </button>
-          {syncResult && (
-            <p className={`mt-2 text-xs ${syncResult.startsWith('Synced') ? 'text-green-400' : 'text-yellow-400'}`}>
-              {syncResult}
-            </p>
-          )}
-        </div>
-      </Section>
-
-      <Section title="Privacy">
-        <div className="rounded-xl border bg-card p-4 text-sm">
-          <div className="flex items-center gap-2 font-medium">
-            <Shield className="h-4 w-4 text-muted-foreground" /> Your data stays yours
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">
-            OrderHub only reads order-related emails. Nothing is shared, sold, or used to train
-            models. You can revoke Gmail access anytime.
-          </p>
-        </div>
-      </Section>
-
-      <button
-        onClick={handleSignOut}
-        className="mt-8 inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm text-muted-foreground hover:border-destructive/40 hover:text-destructive"
-      >
-        <LogOut className="h-4 w-4" /> Log out
-      </button>
-    </div>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="mt-8">
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-        {title}
-      </h2>
-      <div className="space-y-2">{children}</div>
-    </section>
-  );
-}
-
-function Row({ icon: Icon, label, value }: { icon: typeof Mail; label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between rounded-xl border bg-card p-4">
-      <div className="flex items-center gap-3">
-        <Icon className="h-4 w-4 text-muted-foreground" />
-        <span className="text-sm font-medium">{label}</span>
+            Manage Google access <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        </Section>
       </div>
-      <span className="text-sm text-muted-foreground">{value}</span>
-    </div>
+    </PageContainer>
   );
 }
 
-function ToggleRow({
-  icon: Icon,
-  label,
+function Section({
+  title,
   description,
-  checked,
-  onChange,
+  children,
 }: {
-  icon: typeof Mail;
-  label: string;
-  description: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
+  title: string;
+  description?: string;
+  children: ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between rounded-xl border bg-card p-4">
-      <div className="flex items-start gap-3">
-        <Icon className="mt-0.5 h-4 w-4 text-muted-foreground" />
-        <div>
-          <div className="text-sm font-medium">{label}</div>
-          <div className="text-xs text-muted-foreground">{description}</div>
-        </div>
-      </div>
-      <Switch checked={checked} onCheckedChange={onChange} />
-    </div>
+    <section className="rounded-lg bg-card p-6">
+      <h2 className="text-base font-semibold">{title}</h2>
+      {description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}
+      <div className="mt-5">{children}</div>
+    </section>
   );
 }

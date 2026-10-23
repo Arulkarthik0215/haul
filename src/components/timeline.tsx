@@ -31,17 +31,14 @@ export function Timeline({ events, currentStatus }: Props) {
               <span
                 className={cn(
                   "absolute left-[15px] top-8 h-full w-px",
-                  done ? "bg-status-delivered/40" : "bg-border",
+                  done ? "bg-ok/40" : "bg-border",
                 )}
               />
             )}
             <div
               className={cn(
-                "relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ring-4 ring-background transition-colors",
-                done
-                  ? "bg-status-delivered/15 text-status-delivered"
-                  : "bg-muted text-muted-foreground",
-                active && "ring-status-delivered/20",
+                "relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ring-4 ring-card transition-colors",
+                done ? "bg-ok/15 text-ok" : "bg-surface-2 text-muted-foreground",
               )}
             >
               <Icon className="h-4 w-4" />

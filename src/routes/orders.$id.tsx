@@ -1,15 +1,17 @@
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
-import { ArrowLeft, ExternalLink, FileText, CreditCard, Calendar, Truck } from "lucide-react";
+import { ArrowLeft, ExternalLink } from "lucide-react";
+import type { ReactNode } from "react";
 import { fetchOrderById } from "@/services/orders";
 import type { Product } from "@/types/order";
 import { MerchantAvatar } from "@/components/merchant-avatar";
 import { StatusBadge } from "@/components/status-badge";
 import { Timeline } from "@/components/timeline";
-import { formatCurrency, formatDate } from "@/lib/format";
+import { PageContainer } from "@/components/page-header";
+import { dueLabel, formatCurrency, formatDate } from "@/lib/format";
 
 export const Route = createFileRoute("/orders/$id")({
-  head: ({ params }) => ({
-    meta: [{ title: `Order ${params.id} · OrderHub` }, { name: "robots", content: "noindex" }],
+  head: () => ({
+    meta: [{ title: "Order · OrderHub" }, { name: "robots", content: "noindex" }],
   }),
   loader: async ({ context, params }) => {
     const order = await context.queryClient.ensureQueryData({
@@ -22,9 +24,15 @@ export const Route = createFileRoute("/orders/$id")({
   component: OrderDetail,
   notFoundComponent: () => (
     <div className="mx-auto max-w-lg px-4 py-24 text-center">
-      <h1 className="text-lg font-semibold">Order not found</h1>
-      <Link to="/orders" className="mt-4 inline-block text-sm text-muted-foreground underline">
-        Back to orders
+      <h1 className="text-xl font-semibold">Order not found</h1>
+      <p className="mt-2 text-sm text-muted-foreground">
+        It may have been removed, or the link is wrong.
+      </p>
+      <Link
+        to="/orders"
+        className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-primary"
+      >
+        <ArrowLeft className="h-4 w-4" /> Back to orders
       </Link>
     </div>
   ),
@@ -32,141 +40,149 @@ export const Route = createFileRoute("/orders/$id")({
 
 function OrderDetail() {
   const { order } = Route.useLoaderData();
+  const inTransit = ["ordered", "packed", "shipped", "out_for_delivery"].includes(order.status);
+  const itemsTotal = order.products.reduce(
+    (s: number, p: Product) => s + p.price * (p.quantity || 1),
+    0,
+  );
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-6 md:px-8 md:py-8">
+    <PageContainer narrow>
       <Link
         to="/orders"
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
       >
-        <ArrowLeft className="h-4 w-4" /> Back to orders
+        <ArrowLeft className="h-4 w-4" /> Orders
       </Link>
 
-      <div className="mt-6 flex flex-wrap items-start justify-between gap-4">
-        <div className="flex items-center gap-4">
+      <div className="mt-6 rounded-lg bg-card p-6">
+        <div className="flex flex-wrap items-start gap-5">
           <MerchantAvatar platform={order.platform} size="lg" />
-          <div>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span>{order.platform}</span>
-              <span>·</span>
-              <span className="font-mono">{order.orderId}</span>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm text-muted-foreground">
+              {order.platform}
+              {order.orderId && (
+                <>
+                  {" · "}
+                  <span className="font-mono text-[13px]">#{order.orderId}</span>
+                </>
+              )}
             </div>
-            <h1 className="mt-1 text-xl font-semibold tracking-tight">{order.merchant}</h1>
-            <div className="mt-2">
+            <h1 className="mt-1 text-2xl font-semibold leading-tight">{order.merchant}</h1>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
               <StatusBadge status={order.status} />
+              {inTransit && order.expectedDelivery && (
+                <span className="text-sm text-muted-foreground">
+                  Arrives {dueLabel(order.expectedDelivery)}
+                </span>
+              )}
             </div>
           </div>
-        </div>
-        <div className="text-right">
-          <div className="text-xs text-muted-foreground">Total</div>
-          <div className="text-2xl font-semibold tabular-nums">
-            {formatCurrency(order.totalAmount, order.currency)}
+          <div className="text-left sm:text-right">
+            <div className="text-[13px] font-medium text-muted-foreground">Total paid</div>
+            <div className="mt-1 text-[28px] font-semibold leading-none tabular-nums">
+              {formatCurrency(order.totalAmount, order.currency)}
+            </div>
           </div>
         </div>
       </div>
 
-      <div className="mt-8 grid gap-6 md:grid-cols-[1fr_320px]">
-        <div className="space-y-6">
-          <section className="rounded-2xl border bg-card p-5">
-            <h2 className="text-sm font-semibold">Timeline</h2>
-            <div className="mt-5">
-              <Timeline events={order.timeline} currentStatus={order.status} />
-            </div>
-          </section>
-
-          <section className="rounded-2xl border bg-card p-5">
-            <h2 className="text-sm font-semibold">Items</h2>
-            <ul className="mt-3 divide-y">
+      <div className="mt-4 grid gap-1 overflow-hidden rounded-lg md:grid-cols-[1fr_300px]">
+        <section className="bg-card p-6">
+          <h2 className="text-base font-semibold">Items</h2>
+          {order.products.length === 0 ? (
+            <p className="mt-3 text-sm text-muted-foreground">
+              The email didn't list individual items.
+            </p>
+          ) : (
+            <ul className="mt-4 grid gap-px overflow-hidden rounded-md bg-border">
               {order.products.map((p: Product) => (
-                <li key={p.id} className="flex items-center justify-between py-3 first:pt-0 last:pb-0">
-                  <div>
-                    <div className="text-sm font-medium">{p.name}</div>
-                    <div className="text-xs text-muted-foreground">Qty {p.quantity}</div>
+                <li
+                  key={p.id}
+                  className="flex items-center justify-between gap-4 bg-background px-4 py-3"
+                >
+                  <div className="min-w-0">
+                    <div className="text-[15px] font-medium">{p.name}</div>
+                    <div className="text-[13px] text-muted-foreground">Qty {p.quantity}</div>
                   </div>
-                  <div className="text-sm font-medium tabular-nums">
+                  <div className="text-[15px] font-medium tabular-nums">
                     {formatCurrency(p.price, order.currency)}
                   </div>
                 </li>
               ))}
             </ul>
-          </section>
-        </div>
+          )}
+          {order.products.length > 1 && itemsTotal > 0 && (
+            <div className="mt-3 flex justify-between px-4 text-sm text-muted-foreground">
+              <span>Items subtotal</span>
+              <span className="tabular-nums">{formatCurrency(itemsTotal, order.currency)}</span>
+            </div>
+          )}
 
-        <aside className="space-y-4">
-          <InfoBlock icon={Calendar} label="Order date" value={formatDate(order.orderDate)} />
-          {order.expectedDelivery && (
-            <InfoBlock
-              icon={Truck}
-              label="Expected delivery"
-              value={formatDate(order.expectedDelivery)}
-            />
+          {order.timeline.length > 0 && (
+            <>
+              <h2 className="mt-10 text-base font-semibold">Updates</h2>
+              <div className="mt-5">
+                <Timeline events={order.timeline} currentStatus={order.status} />
+              </div>
+            </>
           )}
-          {order.deliveredDate && (
-            <InfoBlock icon={Truck} label="Delivered" value={formatDate(order.deliveredDate)} />
-          )}
-          <InfoBlock icon={CreditCard} label="Payment" value={order.paymentMethod} />
-          {order.trackingNumber && (
-            <InfoBlock
-              icon={Truck}
-              label="Tracking"
-              value={order.trackingNumber}
-              action={
-                order.trackingUrl ? (
+        </section>
+
+        <aside className="bg-card p-6">
+          <h2 className="text-base font-semibold">Details</h2>
+          <dl className="mt-4 space-y-4">
+            <Detail label="Ordered">{formatDate(order.orderDate)}</Detail>
+            {order.expectedDelivery && (
+              <Detail label="Expected">{formatDate(order.expectedDelivery)}</Detail>
+            )}
+            {order.deliveredDate && (
+              <Detail label="Delivered">{formatDate(order.deliveredDate)}</Detail>
+            )}
+            {order.paymentMethod && <Detail label="Payment">{order.paymentMethod}</Detail>}
+            {order.trackingNumber && (
+              <Detail label="Tracking">
+                <span className="font-mono text-[13px]">{order.trackingNumber}</span>
+                {order.trackingUrl && (
                   <a
                     href={order.trackingUrl}
-                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-1 flex items-center gap-1 text-sm font-semibold text-primary"
                   >
-                    Track <ExternalLink className="h-3 w-3" />
+                    Track parcel <ExternalLink className="h-3.5 w-3.5" />
                   </a>
-                ) : null
-              }
-            />
-          )}
-          {order.returnDeadline && (
-            <InfoBlock
-              icon={Calendar}
-              label="Return window"
-              value={`Until ${formatDate(order.returnDeadline)}`}
-            />
-          )}
+                )}
+              </Detail>
+            )}
+            {order.returnDeadline && (
+              <Detail label="Return by">{formatDate(order.returnDeadline)}</Detail>
+            )}
+            <Detail label="Category">
+              <span className="capitalize">{order.category}</span>
+            </Detail>
+          </dl>
           {order.invoiceUrl && (
             <a
               href={order.invoiceUrl}
-              className="flex items-center justify-between rounded-xl border bg-card p-4 text-sm hover:border-foreground/20"
+              target="_blank"
+              rel="noreferrer"
+              className="mt-6 flex h-10 items-center justify-center gap-2 rounded-md bg-surface-2 text-sm font-semibold transition-colors hover:bg-foreground hover:text-background"
             >
-              <span className="inline-flex items-center gap-2">
-                <FileText className="h-4 w-4 text-muted-foreground" />
-                Invoice
-              </span>
-              <ExternalLink className="h-4 w-4 text-muted-foreground" />
+              View invoice <ExternalLink className="h-4 w-4" />
             </a>
           )}
         </aside>
       </div>
-    </div>
+    </PageContainer>
   );
 }
 
-function InfoBlock({
-  icon: Icon,
-  label,
-  value,
-  action,
-}: {
-  icon: typeof Calendar;
-  label: string;
-  value: string;
-  action?: React.ReactNode;
-}) {
+function Detail({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="rounded-xl border bg-card p-4">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <Icon className="h-3.5 w-3.5" /> {label}
-      </div>
-      <div className="mt-1 flex items-center justify-between">
-        <div className="text-sm font-medium">{value}</div>
-        {action}
-      </div>
+    <div>
+      <dt className="text-[13px] text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5 text-[15px] font-medium">{children}</dd>
     </div>
   );
 }

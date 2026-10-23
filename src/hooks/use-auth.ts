@@ -14,7 +14,11 @@ export function useAuthSession() {
 
 export function useSignIn() {
   return useMutation({
-    mutationFn: signInWithGoogle,
+    mutationFn: async () => {
+      const res = await signInWithGoogle();
+      if (res.error) throw res.error;
+      return res;
+    },
   });
 }
 
