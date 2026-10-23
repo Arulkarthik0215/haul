@@ -11,7 +11,7 @@ import type { Order, OrderStatus, Platform } from "@/types/order";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/orders/")({
-  head: () => ({ meta: [{ title: "Orders · OrderHub" }] }),
+  head: () => ({ meta: [{ title: "Orders · Haul" }] }),
   component: OrdersPage,
 });
 

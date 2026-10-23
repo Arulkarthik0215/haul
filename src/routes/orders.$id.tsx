@@ -11,7 +11,7 @@ import { dueLabel, formatCurrency, formatDate } from "@/lib/format";
 
 export const Route = createFileRoute("/orders/$id")({
   head: () => ({
-    meta: [{ title: "Order · OrderHub" }, { name: "robots", content: "noindex" }],
+    meta: [{ title: "Order · Haul" }, { name: "robots", content: "noindex" }],
   }),
   loader: async ({ context, params }) => {
     const order = await context.queryClient.ensureQueryData({

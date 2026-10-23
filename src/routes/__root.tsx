@@ -82,13 +82,13 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "OrderHub — All your orders in one place" },
+      { title: "Haul — All your orders in one place" },
       {
         name: "description",
         content:
-          "OrderHub reads your order emails and keeps every purchase — Amazon, Flipkart, Swiggy, Myntra and more — in one tidy, private list.",
+          "Haul reads your order emails and keeps every purchase — Amazon, Flipkart, Swiggy, Myntra and more — in one tidy, private list.",
       },
-      { property: "og:title", content: "OrderHub — All your orders in one place" },
+      { property: "og:title", content: "Haul — All your orders in one place" },
       {
         property: "og:description",
         content: "A unified dashboard for every online purchase — powered by your inbox.",

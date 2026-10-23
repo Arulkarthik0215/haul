@@ -16,7 +16,7 @@ import type { Order, OrderStatus } from "@/types/order";
 export const Route = createFileRoute("/dashboard")({
   head: () => ({
     meta: [
-      { title: "Home · OrderHub" },
+      { title: "Home · Haul" },
       { name: "description", content: "Where all your online orders stand, in one place." },
     ],
   }),
@@ -78,7 +78,7 @@ function Dashboard() {
           <div className="min-w-0">
             <div className="text-[15px] font-semibold">Keep your orders up to date</div>
             <div className="text-sm text-muted-foreground">
-              <LastSynced /> · OrderHub reads only order, shipping and receipt emails.
+              <LastSynced /> · Haul reads only order, shipping and receipt emails.
             </div>
           </div>
         </div>
@@ -90,7 +90,7 @@ function Dashboard() {
           <EmptyState
             icon={Inbox}
             title="No orders yet"
-            description="Sync your Gmail inbox and OrderHub will pick out your order confirmations, shipping updates and receipts."
+            description="Sync your Gmail inbox and Haul will pick out your order confirmations, shipping updates and receipts."
             action={<SyncButton />}
           />
         </div>

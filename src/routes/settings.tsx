@@ -9,7 +9,7 @@ import { UserChip } from "@/components/user-chip";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/settings")({
-  head: () => ({ meta: [{ title: "Settings · OrderHub" }] }),
+  head: () => ({ meta: [{ title: "Settings · Haul" }] }),
   component: SettingsPage,
 });
 
@@ -43,7 +43,7 @@ function SettingsPage() {
 
         <Section
           title="Gmail sync"
-          description="OrderHub reads order, shipping and receipt emails — read-only. It never sends, deletes or changes mail."
+          description="Haul reads order, shipping and receipt emails — read-only. It never sends, deletes or changes mail."
         >
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>

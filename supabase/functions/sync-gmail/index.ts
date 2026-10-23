@@ -12,7 +12,10 @@ const PLATFORMS = [
 const STATUSES = ["ordered", "packed", "shipped", "out_for_delivery", "delivered", "cancelled", "refunded"];
 const CATEGORIES = ["shopping", "food", "grocery", "entertainment", "travel"];
 
-const GMAIL_QUERY = "subject:(order OR receipt OR invoice OR purchase OR shipped OR delivery)";
+// Gmail's own Purchases / Reservations groupings, plus a subject match for order emails Gmail
+// files elsewhere (e.g. Updates or Primary). In Gmail search, { a b c } means "any of".
+const GMAIL_QUERY =
+  "{category:purchases category:reservations subject:(order OR receipt OR invoice OR purchase OR shipped OR delivery OR booking)}";
 
 // Gemini model is configurable so it can be bumped without a code change when Google retires models
 const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") || "gemini-3.8-flash";

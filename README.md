@@ -1,12 +1,12 @@
-# OrderHub (inbox-chronicle)
+# Haul (inbox-chronicle)
 
-OrderHub turns your Gmail inbox into one clean dashboard of all your online orders.
-Sign in with Google, click **Sync Now**, and OrderHub finds order / receipt / shipping emails
+Haul turns your Gmail inbox into one clean dashboard of all your online orders.
+Sign in with Google, click **Sync Now**, and Haul finds order / receipt / shipping emails
 from Amazon, Flipkart, Swiggy, Zomato, Myntra and others, uses Google Gemini AI to read them,
 and shows every order — merchant, items, amount, status, tracking — in one place.
 
 > A detailed beginner-friendly technical guide is available in
-> [`docs/OrderHub-Technical-Guide.pdf`](docs/OrderHub-Technical-Guide.pdf).
+> [`docs/OrderHub-Technical-Guide.pdf`](docs/OrderHub-Technical-Guide.pdf) (written before the rename to Haul).
 
 ---
 
@@ -18,7 +18,7 @@ and shows every order — merchant, items, amount, status, tracking — in one p
 - **Orders list** with platform / status filters, and an **order detail** page with products and timeline
 - **Analytics** — spend by platform and category charts
 - **Dark / light theme**, responsive layout with mobile navigation
-- **Demo mode** — runs on built-in mock data when no Supabase keys are configured
+- **Landing page** at `/` with Google sign-in; signed-in users go straight to `/dashboard`
 
 ## Tech stack
 
@@ -94,7 +94,7 @@ VITE_SUPABASE_URL=https://<your-project-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY=<your-anon-public-key>
 ```
 
-Without these two values the app runs in **demo mode** with mock orders.
+Both values are required — sign-in and sync need Supabase.
 
 ### 2. Start the dev server
 
@@ -113,7 +113,8 @@ Open the URL Vite prints (e.g. `http://localhost:8080`).
      and (while in Testing) add your Gmail address as a test user;
    - add `https://<your-project-ref>.supabase.co/auth/v1/callback` as an authorized redirect URI.
 3. **Supabase Auth** — Authentication → Providers → Google: paste the Client ID and Secret.
-   Under URL Configuration add your app URL (e.g. `http://localhost:8080`) to the redirect allow list.
+   Under URL Configuration set the **Site URL** to your live address (`https://haul-umber.vercel.app`) and add
+   `https://haul-umber.vercel.app/**` and `http://localhost:8080/**` to **Redirect URLs**.
 4. **Edge function secrets and deploy**
 
    ```bash
@@ -136,6 +137,15 @@ Open the URL Vite prints (e.g. `http://localhost:8080`).
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier |
 
+## Deploying (Vercel)
+
+Live at **https://haul-umber.vercel.app**. Vercel builds from `main` on every push.
+
+- Environment variables in Vercel: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
+- The edge function deploys separately: `npx supabase functions deploy sync-gmail`.
+- Google sign-in returns to Supabase, which sends users back to the site — so the live URL must be in
+  Supabase → Authentication → URL Configuration (see step 3 above). No change is needed in Google Cloud.
+
 ## Troubleshooting
 
 | Message | Cause / fix |
@@ -151,6 +161,6 @@ Open the URL Vite prints (e.g. `http://localhost:8080`).
 ## Known limitations
 
 - Each click scans up to ~100 of the newest matching emails; older history isn't reached yet.
-- Gmail search uses subject keywords only (order, receipt, invoice, purchase, shipped, delivery).
+- Gmail search covers the Purchases and Reservations tabs plus subject keywords (order, receipt, invoice, purchase, shipped, delivery, booking); order emails outside both can still be missed.
 - “Ordered”, “Shipped” and “Delivered” emails for the same order are stored as separate orders; the order timeline isn't filled yet.
 - The Search page and the “Automatic sync” toggle still use placeholder behaviour.

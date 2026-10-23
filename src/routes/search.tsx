@@ -10,7 +10,7 @@ import { useOrders } from "@/hooks/use-orders";
 const searchSchema = z.object({ q: z.string().optional().default("") });
 
 export const Route = createFileRoute("/search")({
-  head: () => ({ meta: [{ title: "Search · OrderHub" }] }),
+  head: () => ({ meta: [{ title: "Search · Haul" }] }),
   validateSearch: searchSchema,
   component: SearchPage,
 });

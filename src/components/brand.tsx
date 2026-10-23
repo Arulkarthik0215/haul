@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 
-/** The OrderHub wordmark — plain type, no icon. */
+/** The Haul wordmark — plain type, no icon. */
 export function Brand({
   to = "/dashboard",
   className,
@@ -12,10 +12,10 @@ export function Brand({
   return (
     <Link
       to={to}
-      aria-label="OrderHub home"
-      className={cn("text-[19px] font-semibold tracking-[-0.03em] text-foreground", className)}
+      aria-label="Haul home"
+      className={cn("text-[18px] font-bold uppercase tracking-[0.22em] text-foreground", className)}
     >
-      OrderHub
+      Haul
     </Link>
   );
 }

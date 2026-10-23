@@ -11,7 +11,7 @@ import { SyncButton } from "@/components/sync-provider";
 import type { Category } from "@/types/order";
 
 export const Route = createFileRoute("/analytics")({
-  head: () => ({ meta: [{ title: "Insights · OrderHub" }] }),
+  head: () => ({ meta: [{ title: "Insights · Haul" }] }),
   component: Insights,
 });
 

@@ -18,11 +18,11 @@ export const Route = createFileRoute("/")({
   head: () => ({
     scripts: [{ children: signedInRedirect }],
     meta: [
-      { title: "OrderHub — Every online order, in one list" },
+      { title: "Haul — Every online order, in one list" },
       {
         name: "description",
         content:
-          "OrderHub reads the order emails in your Gmail and turns them into one private list — Amazon, Flipkart, Swiggy, Myntra and more.",
+          "Haul reads the order emails in your Gmail and turns them into one private list — Amazon, Flipkart, Swiggy, Myntra and more.",
       },
     ],
   }),
@@ -155,8 +155,8 @@ function Landing() {
               Every order you've placed, in one tidy list.
             </h1>
             <p className="mt-6 max-w-md text-[17px] leading-relaxed text-muted-foreground">
-              OrderHub reads the order emails already in your Gmail — Amazon, Flipkart, Swiggy,
-              Myntra and more — and turns them into one private list you can actually use.
+              Haul reads the order emails already in your Gmail — Amazon, Flipkart, Swiggy, Myntra
+              and more — and turns them into one private list you can actually use.
             </p>
 
             <div className="mt-9">
@@ -205,11 +205,11 @@ function Landing() {
             {[
               [
                 "Sign in with Google",
-                "Grant read-only access to Gmail. OrderHub can't send, delete or change anything in your inbox.",
+                "Grant read-only access to Gmail. Haul can't send, delete or change anything in your inbox.",
               ],
               [
                 "Sync your inbox",
-                "OrderHub looks for order confirmations, shipping updates and receipts — and skips everything else.",
+                "Haul looks for order confirmations, shipping updates and receipts — and skips everything else.",
               ],
               [
                 "See it all in one place",
@@ -259,15 +259,15 @@ function Landing() {
         >
           <SectionHead
             title="Your inbox stays yours"
-            text="Here's exactly what OrderHub does with access to your Gmail — and what it never does."
+            text="Here's exactly what Haul does with access to your Gmail — and what it never does."
           />
           <div className="mt-14 grid gap-1 overflow-hidden rounded-xl md:grid-cols-2">
             <div className="bg-card p-7 md:p-9">
-              <h3 className="text-sm font-semibold text-ok">OrderHub can</h3>
+              <h3 className="text-sm font-semibold text-ok">Haul can</h3>
               <ul className="mt-5 space-y-4">
                 <Point ok>
-                  Read emails whose subject mentions an order, receipt, invoice, purchase, shipment
-                  or delivery
+                  Read emails in Gmail's Purchases and Reservations tabs, and emails whose subject
+                  mentions an order, receipt, invoice, shipment, delivery or booking
                 </Point>
                 <Point ok>
                   Use Google's Gemini AI to pull the order details out of those emails
@@ -278,7 +278,7 @@ function Landing() {
               </ul>
             </div>
             <div className="bg-card p-7 md:p-9">
-              <h3 className="text-sm font-semibold text-bad">OrderHub can't</h3>
+              <h3 className="text-sm font-semibold text-bad">Haul can't</h3>
               <ul className="mt-5 space-y-4">
                 <Point>Send, delete, archive or change any email</Point>
                 <Point>Show your orders to anyone but you</Point>
@@ -287,7 +287,7 @@ function Landing() {
             </div>
           </div>
           <p className="mt-6 text-center text-sm text-muted-foreground">
-            You can remove OrderHub's access at any time from your{" "}
+            You can remove Haul's access at any time from your{" "}
             <a
               href="https://myaccount.google.com/permissions"
               target="_blank"
@@ -307,12 +307,13 @@ function Landing() {
             <div className="mt-12 space-y-1">
               <Faq q="Which shops does it work with?">
                 Any shop that emails you an order confirmation, invoice or shipping update — Amazon,
-                Flipkart, Swiggy, Zomato, Myntra, Blinkit, BookMyShow and many more. Shops OrderHub
+                Flipkart, Swiggy, Zomato, Myntra, Blinkit, BookMyShow and many more. Shops Haul
                 doesn't recognise by name still show up under their own name.
               </Faq>
-              <Faq q="Does OrderHub read all of my email?">
-                No. It only opens emails whose subject looks like an order, receipt, invoice,
-                purchase, shipment or delivery — and from those it keeps just the order details.
+              <Faq q="Does Haul read all of my email?">
+                No. It only opens emails Gmail files under Purchases or Reservations, or whose
+                subject looks like an order, receipt, invoice, shipment, delivery or booking — and
+                from those it keeps just the order details.
               </Faq>
               <Faq q="How do new orders show up?">
                 Press Sync whenever you like. Each sync picks up new order emails and skips the ones
@@ -323,8 +324,8 @@ function Landing() {
                 order to see what was found — the original email is always still in your Gmail.
               </Faq>
               <Faq q="How do I disconnect?">
-                Sign out from Settings, and remove OrderHub at myaccount.google.com/permissions.
-                After that it can't read anything in your inbox.
+                Sign out from Settings, and remove Haul at myaccount.google.com/permissions. After
+                that it can't read anything in your inbox.
               </Faq>
             </div>
           </div>
@@ -363,7 +364,7 @@ function Landing() {
               Questions
             </a>
           </nav>
-          <p>© {new Date().getFullYear()} OrderHub</p>
+          <p>© {new Date().getFullYear()} Haul</p>
         </div>
       </footer>
     </div>

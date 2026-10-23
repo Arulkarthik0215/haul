@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 export type Theme = "dark" | "light";
-const KEY = "orderhub-theme";
+const KEY = "haul-theme";
 
 // Runs before React hydrates (see __root.tsx) so the first paint already has the right theme:
 // the stored choice wins, otherwise the operating system's preference.

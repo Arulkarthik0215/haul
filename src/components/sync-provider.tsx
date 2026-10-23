@@ -103,7 +103,7 @@ export function SyncProvider({ children }: { children: ReactNode }) {
 
     try {
       if (!supabase) {
-        fail("OrderHub isn't connected to its backend right now. Please try again later.", true);
+        fail("Haul isn't connected to its backend right now. Please try again later.", true);
         return;
       }
 
@@ -112,7 +112,7 @@ export function SyncProvider({ children }: { children: ReactNode }) {
       } = await supabase.auth.getSession();
       if (!session) {
         fail(
-          "You're not signed in. Sign in with Google so OrderHub can read your order emails.",
+          "You're not signed in. Sign in with Google so Haul can read your order emails.",
           true,
         );
         return;
