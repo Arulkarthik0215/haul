@@ -29,14 +29,13 @@ and shows every order — merchant, items, amount, status, tracking — in one p
 | Data fetching | TanStack Query | Loading/caching orders, auth session |
 | Styling | Tailwind CSS 4, Radix UI (shadcn/ui), lucide-react | Design system, accessible components, icons |
 | Charts | Recharts | Analytics page |
-| Build tool | Vite 8 (via `@lovable.dev/vite-tanstack-config`) | Dev server and production build |
-| Hosting target | Nitro → Cloudflare Workers | Server runtime for the built app |
+| Build tool | Vite 8 | Dev server and production build |
+| Hosting target | Nitro → Vercel | Server runtime for the built app |
 | Auth | Supabase Auth with Google OAuth | Login + Gmail read permission |
 | Database | Supabase Postgres + Row Level Security | Orders, products, timeline, sync state |
 | Backend | Supabase Edge Function `sync-gmail` (Deno) | Gmail fetching, AI parsing, saving orders |
 | AI | Google Gemini API (`gemini-3.8-flash` by default) | Turning email text into order JSON |
 | External API | Gmail API (`gmail.readonly`) | Listing and reading order emails |
-| Editor | Lovable | Visual editing; this repo syncs with Lovable |
 
 ## How it works (short version)
 
@@ -132,7 +131,7 @@ Open the URL Vite prints (e.g. `http://localhost:8080`).
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Start the dev server with hot reload |
-| `npm run build` | Production build (Nitro, Cloudflare target) |
+| `npm run build` | Production build (Nitro, Vercel target) |
 | `npm run preview` | Preview the production build |
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier |
@@ -155,8 +154,3 @@ Open the URL Vite prints (e.g. `http://localhost:8080`).
 - Gmail search uses subject keywords only (order, receipt, invoice, purchase, shipped, delivery).
 - “Ordered”, “Shipped” and “Delivered” emails for the same order are stored as separate orders; the order timeline isn't filled yet.
 - The Search page and the “Automatic sync” toggle still use placeholder behaviour.
-
-## Lovable
-
-This project is connected to [Lovable](https://lovable.dev). Commits pushed to `main` sync back to
-the Lovable editor — keep `main` working and never force-push or rewrite pushed history.
