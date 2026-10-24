@@ -55,6 +55,8 @@ interface SyncResponse {
   success?: boolean;
   processed?: number;
   orders?: unknown[];
+  /** Emails that updated an order already saved (e.g. "delivered" after "order placed"). */
+  updated_orders?: number;
   errors?: string[];
   deferred?: number;
   skip_reasons?: {
@@ -79,6 +81,7 @@ interface SyncRun {
   pages: number;
   processed: number;
   ordersFound: number;
+  ordersUpdated: number;
   failed: number;
   deferred: number;
   alreadySynced: number;
@@ -97,6 +100,7 @@ const initialRun: SyncRun = {
   pages: 0,
   processed: 0,
   ordersFound: 0,
+  ordersUpdated: 0,
   failed: 0,
   deferred: 0,
   alreadySynced: 0,
@@ -238,6 +242,7 @@ export function SyncProvider({ children }: { children: ReactNode }) {
         const common = (r: SyncRun): SyncRun => ({
           ...r,
           ordersFound: r.ordersFound + found,
+          ordersUpdated: r.ordersUpdated + (result.updated_orders || 0),
           failed: r.failed + (result.errors?.length || 0),
           notOrders: r.notOrders + (result.skip_reasons?.not_an_order || 0),
           notOrderSubjects: [...r.notOrderSubjects, ...(result.not_order_subjects ?? [])].slice(
@@ -503,6 +508,8 @@ function SyncDialog({
               <DialogPrimitive.Description className="mx-auto mt-2 max-w-xs text-[15px] leading-relaxed text-muted-foreground">
                 Checked {run.processed} email{run.processed === 1 ? "" : "s"}
                 {run.alreadySynced > 0 && ` (${run.alreadySynced} already in your list)`}.
+                {run.ordersUpdated > 0 &&
+                  ` ${run.ordersUpdated} update${run.ordersUpdated === 1 ? "" : "s"} (like shipped or delivered) added to orders you already had.`}
                 {run.moreAvailable && " Sync again to go further back in your inbox."}
               </DialogPrimitive.Description>
               {(run.deferred > 0 || run.failed > 0 || run.notOrders > 0) && (

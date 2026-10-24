@@ -11,11 +11,23 @@ const PLATFORMS = [
 ];
 const STATUSES = ["ordered", "packed", "shipped", "out_for_delivery", "delivered", "cancelled", "refunded"];
 const CATEGORIES = ["shopping", "food", "grocery", "entertainment", "travel"];
+// How far along an order is; a later email only moves the status forward
+const STATUS_RANK: Record<string, number> = Object.fromEntries(STATUSES.map((s, i) => [s, i]));
+const STATUS_TITLES: Record<string, string> = {
+  ordered: "Order placed",
+  packed: "Packed",
+  shipped: "Shipped",
+  out_for_delivery: "Out for delivery",
+  delivered: "Delivered",
+  cancelled: "Cancelled",
+  refunded: "Refunded",
+};
 
 // Gmail's own Purchases / Reservations groupings, plus a subject match for order emails Gmail
 // files elsewhere (e.g. Updates or Primary). In Gmail search, { a b c } means "any of".
+// Receipt / invoice subjects are left out: they are mostly payment and bank mail, not orders.
 const GMAIL_QUERY =
-  "{category:purchases category:reservations subject:(order OR receipt OR invoice OR purchase OR shipped OR delivery OR booking)}";
+  "{category:purchases category:reservations subject:(order OR shipped OR dispatched OR delivered OR delivery OR booking)}";
 
 // Models are configurable so they can be changed without a code change when providers retire them
 const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") || "gemini-3.8-flash";
@@ -188,6 +200,18 @@ interface EmailForAI {
 const NOT_ORDER_SUBJECT =
   /\b(otp|one[- ]time password|verification code|security code|password reset|is about to expire|has expired|expired for|expiring soon|bill (is )?due|payment (is )?due|newsletter|webinar|sale ends|limited[- ]time offer|coupon code)\b|\d+% off/i;
 
+// Bank, card, UPI and wallet alerts: money moving, not an order. Skipped without the AI unless the
+// subject also talks about an order (e.g. "Refund credited for your order").
+const TRANSACTION_SUBJECT =
+  /\b(debited|credited|transaction|txn|upi|a\/c|account statement|card statement|e-?statement|emi|money (sent|received)|bill payment|recharge|wallet|autopay|mandate)\b/i;
+const ORDER_WORDS = /\b(order|shipped|dispatched|delivered|out for delivery|refund|booking|booked|ticket)\b/i;
+
+/** Order numbers as merchants write them ("#OD-1234 5") reduced to one comparable form. */
+function normalizeOrderId(value: unknown): string | null {
+  const id = String(value ?? "").replace(/[#\s]/g, "").toUpperCase();
+  return id.length >= 5 ? id : null;
+}
+
 /** The extraction instructions plus up to AI_BATCH_SIZE emails, for any provider. */
 function buildBatchPrompt(emails: EmailForAI[]): string {
   return `You read emails and extract online order details. For EACH email below, return one entry, using this JSON shape:
@@ -208,11 +232,15 @@ function buildBatchPrompt(emails: EmailForAI[]): string {
   "payment_method": "if mentioned, else null"
 }]}
 
-Set "is_order" to true for anything about something the reader bought or booked: order confirmations,
-shipping / out-for-delivery / delivered updates, receipts, invoices, payment receipts, app-store or subscription
-receipts, food or grocery orders, cancellations, refunds, and travel / movie / event bookings.
-Set "is_order" to false only for marketing, newsletters, OTPs, plan-expiry or bill reminders, and other emails
-with no purchase in them. When "is_order" is false, return only "key" and "is_order".
+Set "is_order" to true only for an order the reader placed with a merchant for goods, food or groceries
+(order confirmations, packed / shipped / out-for-delivery / delivered updates, cancellations and refunds of
+such an order), and for travel, ride, movie or event bookings.
+Set "is_order" to false for everything else, including: bank, credit card, UPI and wallet transaction alerts,
+"payment successful" or "money sent" emails not tied to an order of items, bill payments, recharges, EMIs,
+statements, subscription or app-store renewals, invoices for services, marketing, newsletters, OTPs and
+reminders. When "is_order" is false, return only "key" and "is_order".
+"order_id" must be the merchant's order number exactly as shown, so later updates about the same order can
+be matched to it.
 Reply with the JSON only.
 
 ${emails.map((e) => `=== EMAIL key: ${e.key}\nFrom: ${e.from}\nSubject: ${e.subject}\nDate: ${e.date}\n\n${e.text}`).join("\n\n")}`;
@@ -460,9 +488,11 @@ Deno.serve(async (req) => {
     // ...and emails an earlier sync already judged "not an order", so the AI never reads them twice
     const { data: skippedBefore } = await adminClient
       .from("skipped_emails")
-      .select("email_message_id")
+      .select("email_message_id, reason")
       .eq("user_id", user.id)
       .in("email_message_id", messages.map((m) => m.id));
+    // "merged" emails were updates folded into an order saved from an earlier email
+    for (const r of skippedBefore ?? []) if (r.reason === "merged") alreadySynced.add(r.email_message_id);
     const previouslySkipped = new Set((skippedBefore ?? []).map((r: any) => r.email_message_id));
 
     const parsedOrders: any[] = [];
@@ -473,6 +503,8 @@ Deno.serve(async (req) => {
     // Non-orders found in this request, remembered at the end
     const toRemember: { email_message_id: string; reason: string; subject: string }[] = [];
     const notOrderSubjects: string[] = [];
+    // Emails that updated an order already saved (e.g. "delivered" after "order placed")
+    let updatedOrders = 0;
 
     // 4. Download the new emails (a few at a time) and drop obvious non-orders without the AI.
     //    Emails not reached before the time budget aren't saved, so the next sync picks them up.
@@ -520,7 +552,7 @@ Deno.serve(async (req) => {
           console.log(`Skipped ${message.id} (no text)`);
           return;
         }
-        if (NOT_ORDER_SUBJECT.test(subject)) {
+        if (NOT_ORDER_SUBJECT.test(subject) || (TRANSACTION_SUBJECT.test(subject) && !ORDER_WORDS.test(subject))) {
           skipped++;
           skipReasons.not_an_order++;
           if (notOrderSubjects.length < 8) notOrderSubjects.push(subject);
@@ -548,9 +580,81 @@ Deno.serve(async (req) => {
     });
 
     // 5. Read the remaining emails with the AI, several per request
-    const saveOrder = async (email: Candidate, orderData: any) => {
+    const addTimelineEvent = (orderId: string, status: string, email: Candidate) =>
+      adminClient.from("order_timeline").insert({
+        order_id: orderId,
+        event_type: status,
+        title: STATUS_TITLES[status] ?? status,
+        description: email.subject || null,
+        timestamp: email.date,
+      });
+
+    const replaceProducts = async (orderId: string, orderData: any, emailId: string) => {
+      const products = Array.isArray(orderData.products) ? orderData.products.filter((p: any) => p?.name) : [];
+      await adminClient.from("order_products").delete().eq("order_id", orderId);
+      if (products.length > 0) {
+        const { error: productsError } = await adminClient.from("order_products").insert(
+          products.map((p: any) => ({
+            order_id: orderId,
+            name: String(p.name),
+            quantity: Math.max(1, Math.round(toNumber(p.quantity)) || 1),
+            price: toNumber(p.price),
+          })),
+        );
+        if (productsError) console.error("Products insert error:", emailId, productsError);
+      }
+    };
+
+    /**
+     * "Order placed", "shipped" and "delivered" emails for the same order number update one order
+     * instead of creating three. Returns false when there is no earlier order to merge into.
+     */
+    const mergeIntoExisting = async (email: Candidate, orderData: any, status: string): Promise<boolean> => {
+      const orderNumber = normalizeOrderId(orderData.order_id);
+      if (!orderNumber) return false;
+      const raw = String(orderData.order_id).trim();
+      const { data: matches } = await adminClient
+        .from("orders")
+        .select(
+          "id, status, total_amount, order_date, tracking_number, expected_delivery, payment_method, delivered_date, products:order_products(id)",
+        )
+        .eq("user_id", user.id)
+        .in("order_id", [...new Set([raw, orderNumber, `#${orderNumber}`])])
+        .order("created_at")
+        .limit(1);
+      const existing: any = matches?.[0];
+      if (!existing) return false;
+
+      const emailOrderDate = toIsoOrNull(orderData.order_date) || email.date;
+      const advances = (STATUS_RANK[status] ?? 0) > (STATUS_RANK[existing.status] ?? 0);
+      const { error } = await adminClient
+        .from("orders")
+        .update({
+          ...(advances ? { status } : {}),
+          // Keep what the earlier email had; fill in only what was missing
+          total_amount: Number(existing.total_amount) > 0 ? existing.total_amount : toNumber(orderData.total_amount),
+          order_date: new Date(emailOrderDate) < new Date(existing.order_date) ? emailOrderDate : existing.order_date,
+          tracking_number: existing.tracking_number || orderData.tracking_number || null,
+          expected_delivery: existing.expected_delivery || toIsoOrNull(orderData.expected_delivery),
+          payment_method: existing.payment_method || orderData.payment_method || null,
+          delivered_date: existing.delivered_date || (status === "delivered" ? email.date : null),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", existing.id);
+      if (error) throw new Error(`DB update failed: ${error.message}`);
+
+      if ((existing.products ?? []).length === 0) await replaceProducts(existing.id, orderData, email.id);
+      await addTimelineEvent(existing.id, status, email);
+      // Remember the email so later syncs skip it without asking the AI again
+      toRemember.push({ email_message_id: email.id, reason: "merged", subject: email.subject });
+      return true;
+    };
+
+    const saveOrder = async (email: Candidate, orderData: any): Promise<"new" | "merged"> => {
       const platform = pick(orderData.platform, [...PLATFORMS, "Other"], "Other");
       const senderName = email.from.replace(/<.*>/, "").replace(/"/g, "").trim();
+      const status = pick(orderData.status, STATUSES, "ordered");
+      if (await mergeIntoExisting(email, orderData, status)) return "merged";
 
       // 6. Upsert into Supabase using admin client (bypasses RLS).
       //    NOT NULL columns get safe fallbacks so a partial AI extraction doesn't drop the order.
@@ -562,7 +666,7 @@ Deno.serve(async (req) => {
             platform,
             merchant: orderData.merchant || (platform !== "Other" ? platform : senderName) || "Unknown",
             order_id: orderData.order_id || null,
-            status: pick(orderData.status, STATUSES, "ordered"),
+            status,
             total_amount: toNumber(orderData.total_amount),
             currency: /^[A-Z]{3}$/.test(orderData.currency ?? "") ? orderData.currency : "INR",
             category: pick(orderData.category, CATEGORIES, "shopping"),
@@ -570,6 +674,7 @@ Deno.serve(async (req) => {
             order_date: toIsoOrNull(orderData.order_date) || email.date,
             expected_delivery: toIsoOrNull(orderData.expected_delivery),
             payment_method: orderData.payment_method || null,
+            delivered_date: status === "delivered" ? email.date : null,
             email_message_id: email.id,
             raw_email_snippet: `${email.subject}\n${email.bodyText.substring(0, 500)}`,
             updated_at: new Date().toISOString(),
@@ -583,20 +688,10 @@ Deno.serve(async (req) => {
         throw new Error(`DB save failed: ${saveError.message}`);
       }
 
-      const products = Array.isArray(orderData.products) ? orderData.products.filter((p: any) => p?.name) : [];
-      await adminClient.from("order_products").delete().eq("order_id", savedOrder.id);
-      if (products.length > 0) {
-        const { error: productsError } = await adminClient.from("order_products").insert(
-          products.map((p: any) => ({
-            order_id: savedOrder.id,
-            name: String(p.name),
-            quantity: Math.max(1, Math.round(toNumber(p.quantity)) || 1),
-            price: toNumber(p.price),
-          })),
-        );
-        if (productsError) console.error("Products insert error:", email.id, productsError);
-      }
+      await replaceProducts(savedOrder.id, orderData, email.id);
+      await addTimelineEvent(savedOrder.id, status, email);
       parsedOrders.push(orderData);
+      return "new";
     };
 
     for (let i = 0; i < candidates.length; i += AI_BATCH_SIZE) {
@@ -638,8 +733,13 @@ Deno.serve(async (req) => {
           continue;
         }
         try {
-          await saveOrder(email, orderData);
-          console.log(`Saved order from ${email.id}: ${email.subject}`);
+          const outcome = await saveOrder(email, orderData);
+          if (outcome === "merged") {
+            updatedOrders++;
+            console.log(`Merged ${email.id} into an earlier order: ${email.subject}`);
+          } else {
+            console.log(`Saved order from ${email.id}: ${email.subject}`);
+          }
         } catch (err: any) {
           console.error("Failed to save order", email.id, err);
           errors.push(`${email.id}: ${err.message}`);
@@ -647,7 +747,7 @@ Deno.serve(async (req) => {
       }
     }
     console.log(
-      `Batch done in ${Date.now() - requestStartedAt}ms: ${parsedOrders.length} saved, ${skipped} skipped, ${errors.length} failed, ${deferred} deferred, AI usage ${JSON.stringify(ai.usage)}`,
+      `Batch done in ${Date.now() - requestStartedAt}ms: ${parsedOrders.length} saved, ${updatedOrders} merged, ${skipped} skipped, ${errors.length} failed, ${deferred} deferred, AI usage ${JSON.stringify(ai.usage)}`,
     );
 
     if (toRemember.length > 0) {
@@ -678,6 +778,7 @@ Deno.serve(async (req) => {
         ai_usage: ai.usage,
         retry_after: deferred > 0 ? retryAfterSec || 15 : 0,
         orders: parsedOrders,
+        updated_orders: updatedOrders,
         errors,
         nextPageToken,
       }),

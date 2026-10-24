@@ -84,3 +84,67 @@ CREATE TABLE IF NOT EXISTS skipped_emails (
 ALTER TABLE skipped_emails ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Users see own skipped emails" ON skipped_emails
   FOR ALL USING (auth.uid() = user_id);
+
+-- ---------------------------------------------------------------------------------------------
+-- One-time cleanup (run once in the SQL editor after deploying the order-merging sync-gmail).
+-- Older syncs saved "order placed", "shipped" and "delivered" emails as separate orders. This
+-- keeps the earliest row per order number, gives it the furthest status reached, and deletes the
+-- copies. Their emails are remembered as "merged" so the next sync doesn't re-read them.
+-- ---------------------------------------------------------------------------------------------
+WITH ranked AS (
+  SELECT
+    id,
+    user_id,
+    email_message_id,
+    first_value(id) OVER w AS keep_id,
+    row_number() OVER w AS rn
+  FROM orders
+  WHERE length(regexp_replace(coalesce(order_id, ''), '[#\s]', '', 'g')) >= 5
+  WINDOW w AS (
+    PARTITION BY user_id, upper(regexp_replace(order_id, '[#\s]', '', 'g'))
+    ORDER BY order_date, created_at
+  )
+),
+dupes AS (SELECT * FROM ranked WHERE rn > 1),
+best AS (
+  SELECT
+    r.keep_id,
+    (array_agg(o.status ORDER BY array_position(
+      ARRAY['ordered','packed','shipped','out_for_delivery','delivered','cancelled','refunded'],
+      o.status
+    ) DESC NULLS LAST))[1] AS status,
+    max(o.total_amount) AS total_amount,
+    max(o.tracking_number) AS tracking_number,
+    max(o.expected_delivery) AS expected_delivery
+  FROM ranked r
+  JOIN orders o ON o.id = r.id
+  WHERE r.keep_id IN (SELECT keep_id FROM dupes)
+  GROUP BY r.keep_id
+),
+updated AS (
+  UPDATE orders o
+  SET status = b.status,
+      total_amount = b.total_amount,
+      tracking_number = coalesce(o.tracking_number, b.tracking_number),
+      expected_delivery = coalesce(o.expected_delivery, b.expected_delivery),
+      updated_at = now()
+  FROM best b
+  WHERE o.id = b.keep_id
+  RETURNING o.id
+),
+remembered AS (
+  INSERT INTO skipped_emails (user_id, email_message_id, reason)
+  SELECT user_id, email_message_id, 'merged' FROM dupes WHERE email_message_id IS NOT NULL
+  ON CONFLICT (user_id, email_message_id) DO NOTHING
+  RETURNING 1
+)
+DELETE FROM orders WHERE id IN (SELECT id FROM dupes);
+
+-- Bank / card / UPI alerts saved as orders by older syncs. Preview first, then run the DELETE.
+-- SELECT id, merchant, total_amount, split_part(raw_email_snippet, E'\n', 1) AS subject
+-- FROM orders
+-- WHERE split_part(raw_email_snippet, E'\n', 1) ~* '\m(debited|credited|transaction|txn|upi|a/c|statement|emi|wallet|recharge|autopay|mandate)\M'
+--   AND split_part(raw_email_snippet, E'\n', 1) !~* '\m(order|shipped|dispatched|delivered|refund|booking|booked|ticket)';
+-- DELETE FROM orders
+-- WHERE split_part(raw_email_snippet, E'\n', 1) ~* '\m(debited|credited|transaction|txn|upi|a/c|statement|emi|wallet|recharge|autopay|mandate)\M'
+--   AND split_part(raw_email_snippet, E'\n', 1) !~* '\m(order|shipped|dispatched|delivered|refund|booking|booked|ticket)';

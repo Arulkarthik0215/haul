@@ -157,7 +157,9 @@ function SkippedEmails() {
     queryFn: async () => {
       const { count } = await supabase!
         .from("skipped_emails")
-        .select("email_message_id", { count: "exact", head: true });
+        .select("email_message_id", { count: "exact", head: true })
+        // "merged" emails were updates to an order already saved, not judged non-orders
+        .neq("reason", "merged");
       return count ?? 0;
     },
   });
@@ -167,7 +169,8 @@ function SkippedEmails() {
       const { error } = await supabase!
         .from("skipped_emails")
         .delete()
-        .eq("user_id", data.user!.id);
+        .eq("user_id", data.user!.id)
+        .neq("reason", "merged");
       if (error) throw error;
     },
     onSuccess: () => {
