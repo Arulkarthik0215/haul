@@ -669,7 +669,7 @@ export function PrimaryButton({
   return (
     <button
       className={cn(
-        "inline-flex h-11 items-center justify-center gap-2 rounded-md bg-primary px-5 text-sm font-semibold text-primary-foreground transition-[background-color,color,transform] duration-200 hover:bg-foreground hover:text-background active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50",
+        "btn-cta inline-flex h-11 items-center justify-center gap-2 rounded-md px-5 text-sm font-semibold disabled:pointer-events-none disabled:opacity-50",
         className,
       )}
       {...props}

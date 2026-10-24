@@ -29,7 +29,7 @@ export const Route = createFileRoute("/")({
   component: Landing,
 });
 
-const SHOPS = [
+const SHOPS: Platform[] = [
   "Amazon",
   "Flipkart",
   "Swiggy",
@@ -110,7 +110,7 @@ function Landing() {
   }, [session, navigate]);
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="min-h-screen overflow-x-clip bg-background text-foreground">
       <header className="sticky top-0 z-30 bg-background/85 backdrop-blur-md">
         <div className="mx-auto flex h-[72px] max-w-6xl items-center gap-8 px-5 md:px-10">
           <Brand to="/" />
@@ -136,7 +136,7 @@ function Landing() {
             <button
               onClick={google.signIn}
               disabled={google.isPending}
-              className="inline-flex h-10 items-center whitespace-nowrap rounded-md bg-foreground px-4 text-sm font-semibold text-background transition-colors hover:bg-primary hover:text-primary-foreground disabled:opacity-60"
+              className="inline-flex h-10 items-center whitespace-nowrap rounded-full bg-foreground px-5 text-sm font-semibold text-background transition-colors hover:bg-primary hover:text-primary-foreground disabled:opacity-60"
             >
               Sign in
             </button>
@@ -146,37 +146,43 @@ function Landing() {
 
       <main>
         {/* Hero */}
-        <section className="mx-auto grid max-w-6xl items-center gap-14 px-5 pb-20 pt-10 md:px-10 lg:min-h-[calc(100svh-72px)] lg:grid-cols-[5fr_6fr] lg:pb-24 lg:pt-4">
-          <div className="animate-rise-in">
-            <p className="text-sm font-semibold uppercase tracking-[0.25em] text-primary">
-              Your orders, sorted
-            </p>
-            <h1 className="mt-4 text-[42px] font-semibold leading-[1.04] tracking-[-0.035em] md:text-[56px]">
-              Every order you've placed, in one tidy list.
-            </h1>
-            <p className="mt-6 max-w-md text-[17px] leading-relaxed text-muted-foreground">
-              Haul reads the order emails already in your Gmail — Amazon, Flipkart, Swiggy, Myntra
-              and more — and turns them into one private list you can actually use.
-            </p>
+        <div className="relative isolate">
+          <div className="backdrop backdrop-grid" aria-hidden>
+            <div className="glow glow-violet -top-[18%] left-[8%] h-[520px] w-[min(720px,90vw)]" />
+            <div className="glow glow-coral -right-[6%] top-[12%] h-[460px] w-[min(560px,80vw)]" />
+          </div>
+          <section className="mx-auto grid max-w-6xl items-center gap-14 px-5 pb-20 pt-10 md:px-10 lg:min-h-[calc(100svh-72px)] lg:grid-cols-[5fr_6fr] lg:pb-24 lg:pt-4">
+            <div className="animate-rise-in">
+              <p className="text-sm font-semibold uppercase tracking-[0.25em] text-primary">
+                Your orders, sorted
+              </p>
+              <h1 className="mt-4 text-[42px] font-semibold leading-[1.04] tracking-[-0.035em] md:text-[56px]">
+                Every order you've placed, in one tidy list.
+              </h1>
+              <p className="mt-6 max-w-md text-[17px] leading-relaxed text-muted-foreground">
+                Haul reads the order emails already in your Gmail — Amazon, Flipkart, Swiggy, Myntra
+                and more — and turns them into one private list you can actually use.
+              </p>
 
-            <div className="mt-9">
-              <GoogleButton onClick={google.signIn} pending={google.isPending} />
-              {google.error && (
-                <p className="mt-3 text-sm text-bad" role="alert">
-                  Couldn't open Google sign-in. Please try again.
-                </p>
-              )}
+              <div className="mt-9">
+                <GoogleButton onClick={google.signIn} pending={google.isPending} />
+                {google.error && (
+                  <p className="mt-3 text-sm text-bad" role="alert">
+                    Couldn't open Google sign-in. Please try again.
+                  </p>
+                )}
+              </div>
+
+              <ul className="mt-9 flex flex-wrap gap-x-7 gap-y-3 text-sm text-muted-foreground">
+                <Trust icon={MailCheck}>Read-only Gmail</Trust>
+                <Trust icon={ShieldCheck}>Only order emails</Trust>
+                <Trust icon={Lock}>Private to you</Trust>
+              </ul>
             </div>
 
-            <ul className="mt-9 flex flex-wrap gap-x-7 gap-y-3 text-sm text-muted-foreground">
-              <Trust icon={MailCheck}>Read-only Gmail</Trust>
-              <Trust icon={ShieldCheck}>Only order emails</Trust>
-              <Trust icon={Lock}>Private to you</Trust>
-            </ul>
-          </div>
-
-          <ProductPreview />
-        </section>
+            <ProductPreview />
+          </section>
+        </div>
 
         {/* Shops */}
         <section className="border-y border-border">
@@ -184,9 +190,13 @@ function Landing() {
             <p className="text-center text-sm text-muted-foreground">
               Works with order emails from
             </p>
-            <ul className="mt-4 flex flex-wrap items-center justify-center gap-x-8 gap-y-3">
+            <ul className="mt-5 flex flex-wrap items-center justify-center gap-x-7 gap-y-4">
               {SHOPS.map((s) => (
-                <li key={s} className="text-[17px] font-semibold tracking-tight text-foreground/55">
+                <li
+                  key={s}
+                  className="flex items-center gap-2.5 text-[16px] font-semibold tracking-tight text-foreground/70"
+                >
+                  <MerchantAvatar platform={s} size="sm" />
                   {s}
                 </li>
               ))}
@@ -196,7 +206,13 @@ function Landing() {
         </section>
 
         {/* How it works */}
-        <section id="how" className="scroll-mt-20 mx-auto max-w-6xl px-5 py-24 md:px-10 md:py-32">
+        <section
+          id="how"
+          className="relative isolate scroll-mt-20 mx-auto max-w-6xl px-5 py-24 md:px-10 md:py-32"
+        >
+          <div className="backdrop overflow-visible" aria-hidden>
+            <div className="glow glow-violet -left-[20%] top-[20%] h-[420px] w-[min(620px,90vw)] opacity-70" />
+          </div>
           <SectionHead
             title="Set up in about a minute"
             text="No forwarding rules, no apps to install. Sign in once and sync whenever you like."
@@ -255,8 +271,11 @@ function Landing() {
         {/* Privacy */}
         <section
           id="privacy"
-          className="scroll-mt-20 mx-auto max-w-6xl px-5 py-24 md:px-10 md:py-32"
+          className="relative isolate scroll-mt-20 mx-auto max-w-6xl px-5 py-24 md:px-10 md:py-32"
         >
+          <div className="backdrop overflow-visible" aria-hidden>
+            <div className="glow glow-coral -right-[18%] top-[25%] h-[420px] w-[min(600px,90vw)] opacity-80" />
+          </div>
           <SectionHead
             title="Your inbox stays yours"
             text="Here's exactly what Haul does with access to your Gmail — and what it never does."
@@ -341,7 +360,11 @@ function Landing() {
 
         {/* Closing call to action */}
         <section className="mx-auto max-w-6xl px-5 py-24 md:px-10 md:py-32">
-          <div className="rounded-xl bg-foreground px-6 py-16 text-center text-background md:px-16 md:py-20">
+          <div className="relative isolate overflow-hidden rounded-xl bg-foreground px-6 py-16 text-center text-background md:px-16 md:py-20">
+            <div className="backdrop" aria-hidden>
+              <div className="glow glow-violet -left-[10%] -top-[40%] h-[420px] w-[min(640px,100%)] [--glow-1:rgb(124_92_255/0.55)]" />
+              <div className="glow glow-coral -bottom-[50%] -right-[10%] h-[400px] w-[min(560px,100%)] [--glow-2:rgb(255_122_89/0.4)]" />
+            </div>
             <h2 className="mx-auto max-w-2xl text-[34px] font-semibold leading-tight tracking-[-0.03em] md:text-[44px]">
               Your orders are already in your inbox.
             </h2>
@@ -399,10 +422,10 @@ function GoogleButton({
       onClick={onClick}
       disabled={pending}
       className={cn(
-        "inline-flex h-12 items-center justify-center gap-3 whitespace-nowrap rounded-md px-6 text-[15px] font-semibold transition-[background-color,color,transform] duration-200 hover:-translate-y-0.5 active:scale-[0.97] disabled:opacity-60",
+        "inline-flex h-12 items-center justify-center gap-3 whitespace-nowrap rounded-full px-7 text-[15px] font-semibold disabled:opacity-60",
         inverted
-          ? "bg-background text-foreground hover:bg-primary hover:text-primary-foreground"
-          : "bg-primary text-primary-foreground hover:bg-foreground hover:text-background",
+          ? "bg-background text-foreground transition-transform duration-200 hover:-translate-y-0.5 active:scale-[0.97]"
+          : "btn-cta",
       )}
     >
       <GoogleIcon />
