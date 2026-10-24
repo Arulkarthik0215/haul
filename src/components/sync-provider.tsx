@@ -10,7 +10,7 @@ import {
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { AlertTriangle, Check, RefreshCw } from "lucide-react";
+import { AlertTriangle, Check, RefreshCw, X } from "lucide-react";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 import { supabase, getProviderToken } from "@/lib/supabase";
@@ -112,6 +112,8 @@ interface SyncContextValue {
   /** A quiet automatic sync is running (no dialog). */
   backgroundSyncing: boolean;
   startSync: () => void;
+  /** Stop a manual sync; orders saved so far stay in the list. */
+  cancelSync: () => void;
 }
 
 const SyncContext = createContext<SyncContextValue | null>(null);
@@ -141,7 +143,11 @@ export function useSyncState() {
 }
 
 /** One call to the sync-gmail function: reads the next page of matching emails. */
-async function requestSyncPage(accessToken: string, pageToken: string | undefined) {
+async function requestSyncPage(
+  accessToken: string,
+  pageToken: string | undefined,
+  signal?: AbortSignal,
+) {
   const res: Response = await fetch(
     `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-gmail`,
     {
@@ -157,6 +163,7 @@ async function requestSyncPage(accessToken: string, pageToken: string | undefine
         page_token: pageToken,
         page_size: PAGE_SIZE,
       }),
+      signal,
     },
   );
   const result: SyncResponse = await res.json().catch(() => ({ error: res.statusText }));
@@ -170,6 +177,10 @@ export function SyncProvider({ children }: { children: ReactNode }) {
   const [backgroundSyncing, setBackgroundSyncing] = useState(false);
   // A manual sync requested while a background one runs starts as soon as it finishes
   const manualRequested = useRef(false);
+  // Lets the dialog's X stop a manual sync between (or during) batches
+  const abortRef = useRef<AbortController | null>(null);
+  const runRef = useRef(run);
+  runRef.current = run;
 
   const startSync = useCallback(async () => {
     if (running.current) {
@@ -177,10 +188,13 @@ export function SyncProvider({ children }: { children: ReactNode }) {
       return;
     }
     running.current = true;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const { signal } = controller;
     setRun({ ...initialRun, phase: "syncing" });
 
     const fail = (errorMessage: string, needsSignIn = false) =>
-      setRun((r) => ({ ...r, phase: "error", errorMessage, needsSignIn }));
+      !signal.aborted && setRun((r) => ({ ...r, phase: "error", errorMessage, needsSignIn }));
 
     try {
       if (!supabase) {
@@ -203,7 +217,12 @@ export function SyncProvider({ children }: { children: ReactNode }) {
       let savedThisPage = 0;
 
       while (hasMore && pages < MAX_PAGES) {
-        const { ok, status, result } = await requestSyncPage(session.access_token, pageToken);
+        const { ok, status, result } = await requestSyncPage(
+          session.access_token,
+          pageToken,
+          signal,
+        );
+        if (signal.aborted) return;
 
         if (!ok) {
           fail(
@@ -236,7 +255,14 @@ export function SyncProvider({ children }: { children: ReactNode }) {
           savedThisPage += found;
           const waitMs = Math.min(Math.max(result.retry_after || 15, 5), 60) * 1000;
           setRun((r) => ({ ...common(r), waitingUntil: Date.now() + waitMs }));
-          await new Promise((resolve) => setTimeout(resolve, waitMs));
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, waitMs);
+            signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+          if (signal.aborted) return;
           setRun((r) => ({ ...r, waitingUntil: undefined }));
           continue;
         }
@@ -261,13 +287,33 @@ export function SyncProvider({ children }: { children: ReactNode }) {
 
       setRun((r) => ({ ...r, phase: "done", moreAvailable: hasMore }));
     } catch (e) {
+      if (signal.aborted) return; // cancelled — the aborted request isn't an error
       console.error(e);
       fail(e instanceof Error ? e.message : "Something went wrong while syncing.");
     } finally {
       running.current = false;
+      abortRef.current = null;
       queryClient.invalidateQueries({ queryKey: ["orders"] });
       queryClient.invalidateQueries({ queryKey: ["sync-state"] });
     }
+  }, [queryClient]);
+
+  const cancelSync = useCallback(() => {
+    if (!abortRef.current) return;
+    abortRef.current.abort();
+    const found = runRef.current.ordersFound;
+    setRun(initialRun);
+    toast("Sync stopped", {
+      description:
+        found > 0
+          ? `${found} order${found === 1 ? " was" : "s were"} saved. Sync again to pick up the rest.`
+          : "Sync again any time to pick up where it left off.",
+    });
+    // The batch that was in flight may still finish saving on the server — refresh once more
+    setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ["orders"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-state"] });
+    }, 20_000);
   }, [queryClient]);
 
   /**
@@ -348,10 +394,15 @@ export function SyncProvider({ children }: { children: ReactNode }) {
 
   return (
     <SyncContext.Provider
-      value={{ run, syncing: run.phase === "syncing", backgroundSyncing, startSync }}
+      value={{ run, syncing: run.phase === "syncing", backgroundSyncing, startSync, cancelSync }}
     >
       {children}
-      <SyncDialog run={run} onClose={() => setRun(initialRun)} onRetry={startSync} />
+      <SyncDialog
+        run={run}
+        onClose={() => setRun(initialRun)}
+        onCancel={cancelSync}
+        onRetry={startSync}
+      />
       <Toaster
         position="bottom-right"
         toastOptions={{
@@ -369,10 +420,12 @@ export function SyncProvider({ children }: { children: ReactNode }) {
 function SyncDialog({
   run,
   onClose,
+  onCancel,
   onRetry,
 }: {
   run: SyncRun;
   onClose: () => void;
+  onCancel: () => void;
   onRetry: () => void;
 }) {
   const navigate = useNavigate();
@@ -399,7 +452,7 @@ function SyncDialog({
   return (
     <DialogPrimitive.Root
       open={run.phase !== "idle"}
-      onOpenChange={(open) => !open && !syncing && onClose()}
+      onOpenChange={(open) => !open && (syncing ? onCancel() : onClose())}
     >
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-[#0e0f11]/45 backdrop-blur-[6px] data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0" />
@@ -408,6 +461,14 @@ function SyncDialog({
           onInteractOutside={(e) => syncing && e.preventDefault()}
           className="fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl bg-popover px-8 pb-8 pt-9 text-center text-popover-foreground shadow-[var(--shadow-glow)] outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95"
         >
+          <DialogPrimitive.Close
+            aria-label={syncing ? "Stop syncing" : "Close"}
+            title={syncing ? "Stop syncing — orders found so far are kept" : "Close"}
+            className="absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </DialogPrimitive.Close>
+
           {syncing && (
             <>
               <SyncLoader />
@@ -415,8 +476,8 @@ function SyncDialog({
                 Syncing your inbox
               </DialogPrimitive.Title>
               <DialogPrimitive.Description className="mx-auto mt-2 max-w-xs text-[15px] leading-relaxed text-muted-foreground">
-                Please wait while we read your order emails. Do not close this window or navigate
-                away.
+                Reading your order emails. You can stop any time with the × — orders found so far
+                are kept.
               </DialogPrimitive.Description>
               <ProgressBar value={run.pages === 0 ? null : progress} />
               <p className="mt-3 text-xs tabular-nums text-muted-foreground" aria-live="polite">
